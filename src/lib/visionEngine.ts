@@ -706,6 +706,7 @@ export class EntranceProcessor {
   private plateReader: PlateReader;
   private uploader: ImageUploader;
   private intervalId: number | null = null;
+  private ocrIntervalId: number | null = null;
   private lockedPlates: Set<string> = new Set();
   private _status: PipelineStatus = 'idle';
   private _lastResult: EntranceResult | null = null;
@@ -1002,6 +1003,45 @@ export class EntranceProcessor {
     ctx.putImageData(imgData, 0, 0);
 
     return plateCanvas;
+  }
+
+  /**
+   * cropFrameRegion — Crops a region of the full video frame based on fractional coordinates.
+   */
+  private cropFrameRegion(
+    sourceCanvas: HTMLCanvasElement,
+    xRatio: number,
+    yRatio: number,
+    wRatio: number,
+    hRatio: number
+  ): HTMLCanvasElement | null {
+    const sw = sourceCanvas.width;
+    const sh = sourceCanvas.height;
+    const x = Math.round(sw * xRatio);
+    const y = Math.round(sh * yRatio);
+    const w = Math.round(sw * wRatio);
+    const h = Math.round(sh * hRatio);
+
+    if (w < 40 || h < 15) return null;
+
+    const cropCanvas = document.createElement('canvas');
+    const scale = 2;
+    cropCanvas.width = w * scale;
+    cropCanvas.height = h * scale;
+    const ctx = cropCanvas.getContext('2d')!;
+
+    ctx.drawImage(sourceCanvas, x, y, w, h, 0, 0, w * scale, h * scale);
+
+    const imgData = ctx.getImageData(0, 0, cropCanvas.width, cropCanvas.height);
+    const d = imgData.data;
+    for (let i = 0; i < d.length; i += 4) {
+      const gray = 0.299 * d[i] + 0.587 * d[i + 1] + 0.114 * d[i + 2];
+      const enhanced = Math.min(255, Math.max(0, (gray - 128) * 1.5 + 128));
+      d[i] = d[i + 1] = d[i + 2] = enhanced;
+    }
+    ctx.putImageData(imgData, 0, 0);
+
+    return cropCanvas;
   }
 
   /**

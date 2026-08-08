@@ -2,7 +2,7 @@ import { useEffect, useState, useCallback } from 'react';
 import { supabase, type ParkingSession, type Payment, type VehicleType } from '@/lib/supabase';
 
 /* ============================================================
- * SmartPark Mobile App — User Side
+ * PLPark Mobile App — User Side
  * Self-contained single-file React component.
  *
  * Supports Concept A (public, search plate to find & pay session)
@@ -95,7 +95,7 @@ const IParking = (s: number) => <MIcon d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 
 
 /** Brand Logo rendering */
 const Logo = ({ size = 40 }: { size?: number }) => (
-  <img src="/plp.png" alt="SmartPark" style={{ width: size, height: size, borderRadius: 8, objectFit: 'contain' }} />
+  <img src="/plp.png" alt="PLPark" style={{ width: size, height: size, borderRadius: 8, objectFit: 'contain' }} />
 );
 
 /**
@@ -217,7 +217,7 @@ export function MobileApp() {
     setUser(data as AppUser);
     setRegisterForm({ full_name: '', email: '', phone: '' });
     setScreen('dashboard');
-    showToast('Account created! Welcome to SmartPark.', 'success');
+    showToast('Account created! Welcome to PLPark.', 'success');
   };
 
   /**
@@ -339,7 +339,7 @@ export function MobileApp() {
             <div className="m-screen m-home">
               <div className="m-home-hero">
                 <Logo size={56} />
-                <h1 className="m-home-title">SmartPark</h1>
+                <h1 className="m-home-title">PLPark</h1>
                 <p className="m-home-tagline">Smart parking, effortless payment</p>
               </div>
 

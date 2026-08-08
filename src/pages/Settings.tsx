@@ -294,7 +294,7 @@ export function Settings() {
                   <div className="settings-form" style={{ maxWidth: '100%' }}>
                     <div className="form-group">
                       <label>Header Text</label>
-                      <input defaultValue={settings.receipt_template?.header || 'SmartPark Parking System'}
+                      <input defaultValue={settings.receipt_template?.header || 'PLPark Parking System'}
                         onBlur={e => saveSetting('receipt_template', { ...settings.receipt_template, header: e.target.value })} />
                     </div>
                     <div className="form-group">

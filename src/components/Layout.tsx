@@ -56,7 +56,7 @@ export function Sidebar({ currentPage, onNavigate, onOpenSettings }: SidebarProp
       <div className="sidebar-brand">
         <img src="/plp.png" alt="Logo" className="sidebar-logo" />
         <div>
-          <div className="sidebar-title">SmartPark</div>
+          <div className="sidebar-title">PLPark</div>
           <div className="sidebar-subtitle">Admin Console</div>
         </div>
       </div>
