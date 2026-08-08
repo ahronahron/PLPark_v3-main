@@ -142,18 +142,13 @@ export function Payments() {
             <label>Parking Duration (hrs)</label>
             <input type="number" step="0.5" value={paymentForm.duration} onChange={e => setPaymentForm({ ...paymentForm, duration: e.target.value })} placeholder="2.5" />
           </div>
-          {/* Hourly rate — pre-filled with default, editable */}
-          <div className="form-group">
+          {/* Hourly rate — below plate and duration for clarity */}
+          <div className="form-group full-width">
             <label>Hourly Rate</label>
             <input type="number" value={paymentForm.rate} onChange={e => setPaymentForm({ ...paymentForm, rate: e.target.value })} />
           </div>
-          {/* Auto-calculated total amount display */}
-          <div className="form-group">
-            <label>Total Amount</label>
-            <div className="total-amount">₱{total.toFixed(2)}</div>
-          </div>
-          {/* Payment method dropdown */}
-          <div className="form-group">
+          {/* Payment method dropdown — placed beneath the initial inputs */}
+          <div className="form-group full-width">
             <label>Payment Method</label>
             <select value={paymentForm.method} onChange={e => setPaymentForm({ ...paymentForm, method: e.target.value as PaymentMethod })}>
               <option value="cash">Cash</option>
@@ -161,8 +156,13 @@ export function Payments() {
               <option value="card">Credit/Debit Card</option>
             </select>
           </div>
+          {/* Auto-calculated total amount display */}
+          <div className="form-group full-width">
+            <label>Total Amount</label>
+            <div className="total-amount">₱{total.toFixed(2)}</div>
+          </div>
           {/* Action buttons */}
-          <div className="form-actions payment-actions">
+          <div className="form-actions payment-actions full-width">
             <button className="btn-primary" onClick={processPayment}>Process Payment</button>
             <button className="btn-secondary">Print Receipt</button>
             <button className="btn-secondary">Send Digital Receipt</button>

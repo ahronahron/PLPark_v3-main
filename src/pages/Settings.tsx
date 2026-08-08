@@ -168,83 +168,85 @@ export function Settings() {
             <h2>Cameras & Vision</h2>
             <p className="settings-desc">Manage system video sources and plate recognition parameters.</p>
             
-            <div style={{ display: 'flex', flexDirection: 'column', gap: '24px' }}>
-<div className="camera-management">
-                  <div>
-                    <h3 style={{ fontSize: '13px', fontWeight: 600, marginBottom: '12px' }}>Camera Setup</h3>
-                    <table className="data-table">
-                      <thead><tr><th>Name</th><th>Type</th><th>Location</th><th>Slot Range</th><th>Status</th><th>Action</th></tr></thead>
-                      <tbody>
-                        {cameras.map(c => {
-                          const edit = cameraEdits[String(c.id)] || {};
-                          return (
-                            <tr key={c.id}>
-                              <td>{c.name}</td>
-                              <td>
-                                <select value={edit.type ?? c.type} onChange={e => updateCameraEdit(c.id, 'type', e.target.value)}>
-                                  <option value="entrance">Entrance</option>
-                                  <option value="exit">Exit</option>
-                                  <option value="slot">Slot</option>
-                                </select>
-                              </td>
-                              <td>
-                                <input type="text" value={edit.location ?? c.location || ''} onChange={e => updateCameraEdit(c.id, 'location', e.target.value)} />
-                              </td>
-                              <td>
-                                <input type="text" value={edit.slot_range ?? c.slot_range || ''} onChange={e => updateCameraEdit(c.id, 'slot_range', e.target.value)} placeholder="A1-A4" />
-                              </td>
-                              <td><span className={`status-badge ${c.is_online ? 'completed' : 'failed'}`}>{c.is_online ? 'online' : 'offline'}</span></td>
-                              <td><button className="btn-secondary" style={{ padding: '6px 12px' }} onClick={() => handleCameraUpdate(c)}>Save</button></td>
-                            </tr>
-                          );
-                        })}
-                        {cameras.length === 0 && <tr><td colSpan={6} className="empty-state">No cameras configured</td></tr>}
-                      </tbody>
-                    </table>
-                  </div>
-
-                  <div className="camera-add-card">
-                    <h3 style={{ fontSize: '13px', fontWeight: 600, marginBottom: '12px' }}>Add Camera</h3>
-                    <div className="settings-form full-width">
-                      <div className="form-group">
-                        <label>Camera Name</label>
-                        <input value={newCamera.name} onChange={e => setNewCamera(prev => ({ ...prev, name: e.target.value }))} placeholder="Entrance Camera 01" />
-                      </div>
-                      <div className="form-group">
-                        <label>Type</label>
-                        <select value={newCamera.type} onChange={e => setNewCamera(prev => ({ ...prev, type: e.target.value }))}>
-                          <option value="entrance">Entrance</option>
-                          <option value="exit">Exit</option>
-                          <option value="slot">Slot</option>
-                        </select>
-                      </div>
-                      <div className="form-group">
-                        <label>Location</label>
-                        <input value={newCamera.location} onChange={e => setNewCamera(prev => ({ ...prev, location: e.target.value }))} placeholder="Main Gate" />
-                      </div>
-                      <div className="form-group">
-                        <label>Slot Range</label>
-                        <input value={newCamera.slot_range} onChange={e => setNewCamera(prev => ({ ...prev, slot_range: e.target.value }))} placeholder="A1-A4" />
-                      </div>
-                      <button className="btn-primary" style={{ width: 'fit-content' }} onClick={handleAddCamera}>Add Camera</button>
+            <div className="camera-section-grid">
+              <div className="camera-top-grid">
+                <div className="camera-add-card">
+                  <h3 style={{ fontSize: '13px', fontWeight: 600, marginBottom: '12px' }}>Add Camera</h3>
+                  <div className="settings-form full-width">
+                    <div className="form-group">
+                      <label>Camera Name</label>
+                      <input value={newCamera.name} onChange={e => setNewCamera(prev => ({ ...prev, name: e.target.value }))} placeholder="Entrance Camera 01" />
                     </div>
+                    <div className="form-group">
+                      <label>Type</label>
+                      <select value={newCamera.type} onChange={e => setNewCamera(prev => ({ ...prev, type: e.target.value }))}>
+                        <option value="entrance">Entrance</option>
+                        <option value="exit">Exit</option>
+                        <option value="slot">Slot</option>
+                      </select>
+                    </div>
+                    <div className="form-group">
+                      <label>Location</label>
+                      <input value={newCamera.location} onChange={e => setNewCamera(prev => ({ ...prev, location: e.target.value }))} placeholder="Main Gate" />
+                    </div>
+                    <div className="form-group">
+                      <label>Slot Range</label>
+                      <input value={newCamera.slot_range} onChange={e => setNewCamera(prev => ({ ...prev, slot_range: e.target.value }))} placeholder="A1-A4" />
+                    </div>
+                    <button className="btn-primary" style={{ width: 'fit-content' }} onClick={handleAddCamera}>Add Camera</button>
                   </div>
                 </div>
 
-              <div>
-                <h3 style={{ fontSize: '13px', fontWeight: 600, marginBottom: '12px' }}>Plate Recognition Parameters</h3>
-                <div className="settings-form">
-                  <div className="form-group">
-                    <label>Confidence Threshold (%)</label>
-                    <input type="number" defaultValue={settings.plate_recognition_confidence_threshold || 85}
-                      onBlur={e => saveSetting('plate_recognition_confidence_threshold', parseInt(e.target.value))} />
-                    <span className="form-hint">Plates below this confidence are flagged for review.</span>
+                <div className="camera-params-card">
+                  <h3 style={{ fontSize: '13px', fontWeight: 600, marginBottom: '12px' }}>Plate Recognition Parameters</h3>
+                  <div className="settings-form">
+                    <div className="form-group">
+                      <label>Confidence Threshold (%)</label>
+                      <input type="number" defaultValue={settings.plate_recognition_confidence_threshold || 85}
+                        onBlur={e => saveSetting('plate_recognition_confidence_threshold', parseInt(e.target.value))} />
+                      <span className="form-hint">Plates below this confidence are flagged for review.</span>
+                    </div>
+                    <div className="form-group">
+                      <label>Camera FPS</label>
+                      <input type="number" defaultValue={settings.camera_fps || 30}
+                        onBlur={e => saveSetting('camera_fps', parseInt(e.target.value))} />
+                    </div>
                   </div>
-                  <div className="form-group">
-                    <label>Camera FPS</label>
-                    <input type="number" defaultValue={settings.camera_fps || 30}
-                      onBlur={e => saveSetting('camera_fps', parseInt(e.target.value))} />
-                  </div>
+                </div>
+              </div>
+
+              <div className="camera-management camera-management-full">
+                <div>
+                  <h3 style={{ fontSize: '13px', fontWeight: 600, marginBottom: '12px' }}>Camera Setup</h3>
+                  <table className="data-table">
+                    <thead><tr><th>Name</th><th>Type</th><th>Location</th><th>Slot Range</th><th>Status</th><th>Action</th></tr></thead>
+                    <tbody>
+                      {cameras.map(c => {
+                        const edit = cameraEdits[String(c.id)] || {};
+                        return (
+                          <tr key={c.id}>
+                            <td>{c.name}</td>
+                            <td>
+                              <select value={edit.type ?? c.type} onChange={e => updateCameraEdit(c.id, 'type', e.target.value)}>
+                                <option value="entrance">Entrance</option>
+                                <option value="exit">Exit</option>
+                                <option value="slot">Slot</option>
+                              </select>
+                            </td>
+                            <td>
+                              <input type="text" value={(edit.location ?? c.location) || ''} onChange={e => updateCameraEdit(c.id, 'location', e.target.value)} />
+                            </td>
+                            <td>
+                              <input type="text" value={(edit.slot_range ?? c.slot_range) || ''} onChange={e => updateCameraEdit(c.id, 'slot_range', e.target.value)} placeholder="A1-A4" />
+                            </td>
+                            <td><span className={`status-badge ${c.is_online ? 'completed' : 'failed'}`}>{c.is_online ? 'online' : 'offline'}</span></td>
+                            <td><button className="btn-secondary" style={{ padding: '6px 12px' }} onClick={() => handleCameraUpdate(c)}>Save</button></td>
+                          </tr>
+                        );
+                      })}
+                      {cameras.length === 0 && <tr><td colSpan={6} className="empty-state">No cameras configured</td></tr>}
+                    </tbody>
+                  </table>
                 </div>
               </div>
             </div>
@@ -282,11 +284,6 @@ export function Settings() {
                     <input type="number" defaultValue={settings.max_capacity_motorcycles || 20}
                       onBlur={e => saveSetting('max_capacity_motorcycles', parseInt(e.target.value))} />
                   </div>
-                  <div className="form-group">
-                    <label>Default Currency</label>
-                    <input type="text" value="₱" disabled style={{ opacity: 0.7, background: 'var(--cursor-bg-tertiary)' }} />
-                    <span className="form-hint">Hardcoded system default (Philippine Peso).</span>
-                  </div>
                 </div>
               </div>
 
@@ -313,27 +310,27 @@ export function Settings() {
                   </div>
                 </div>
 
-                <div style={{ marginTop: '24px' }}>
-                  <h3 style={{ fontSize: '13px', fontWeight: 600, marginBottom: '12px' }}>Payment Gateways</h3>
-                  <div className="settings-form" style={{ maxWidth: '100%' }}>
-                    {['cash', 'gcash', 'card'].map(method => (
-                      <div key={method} className="toggle-row">
-                        <span className="toggle-label" style={{ textTransform: 'capitalize' }}>
-                          {method === 'gcash' ? 'GCash' : method === 'card' ? 'Credit/Debit Card' : 'Cash'}
-                        </span>
-                        <label className="toggle-switch">
-                          <input type="checkbox" defaultChecked={(settings.payment_methods || []).includes(method)}
-                            onChange={e => {
-                              const current = settings.payment_methods || [];
-                              const updated = e.target.checked ? [...current, method] : current.filter((m: string) => m !== method);
-                              saveSetting('payment_methods', updated);
-                            }} />
-                          <span className="toggle-slider" />
-                        </label>
-                      </div>
-                    ))}
+              </div>
+            </div>
+            <div className="payment-gateway-panel">
+              <h3 style={{ fontSize: '13px', fontWeight: 600, marginBottom: '12px' }}>Payment Gateways</h3>
+              <div className="settings-form gateway-form" style={{ maxWidth: '480px', margin: '0 auto' }}>
+                {['cash', 'gcash', 'card'].map(method => (
+                  <div key={method} className="toggle-row">
+                    <span className="toggle-label" style={{ textTransform: 'capitalize' }}>
+                      {method === 'gcash' ? 'GCash' : method === 'card' ? 'Credit/Debit Card' : 'Cash'}
+                    </span>
+                    <label className="toggle-switch">
+                      <input type="checkbox" defaultChecked={(settings.payment_methods || []).includes(method)}
+                        onChange={e => {
+                          const current = settings.payment_methods || [];
+                          const updated = e.target.checked ? [...current, method] : current.filter((m: string) => m !== method);
+                          saveSetting('payment_methods', updated);
+                        }} />
+                      <span className="toggle-slider" />
+                    </label>
                   </div>
-                </div>
+                ))}
               </div>
             </div>
           </div>

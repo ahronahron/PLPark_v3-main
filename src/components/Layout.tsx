@@ -4,28 +4,24 @@
  * This module exports three layout components that form the
  * structural skeleton of the admin dashboard:
  *
- * 1. **Sidebar** — Left navigation panel with branding, nav items, settings, and collapse toggle
+ * 1. **Sidebar** — Left navigation panel with branding, nav items, and settings
  * 2. **Topbar** — Top header with page title, search, notifications, and user profile dropdown
  * 3. **PageContainer** — Content wrapper that applies consistent padding and scrolling
  *
  * These components are composed in App.tsx to create the admin layout.
  */
 import { useState, useEffect, type ReactNode } from 'react';
-import { IconDashboard, IconChart, IconGrid, IconSettings, IconBell, IconSearch, IconLogs, IconArrowLeft, IconArrowRight } from '@/components/Icons';
+import { IconDashboard, IconChart, IconGrid, IconSettings, IconBell, IconSearch, IconLogs } from '@/components/Icons';
 
 /**
  * SidebarProps — Props interface for the Sidebar component.
  * @property currentPage — The currently active page ID for highlighting
  * @property onNavigate — Callback fired when a nav item is clicked
- * @property collapsed — Whether the sidebar is currently collapsed
- * @property onToggleCollapse — Callback to toggle collapsed state
  * @property onOpenSettings — Callback to open the settings modal
  */
 interface SidebarProps {
   currentPage: string;
   onNavigate: (page: string) => void;
-  collapsed: boolean;
-  onToggleCollapse: () => void;
   onOpenSettings: () => void;
 }
 
@@ -47,17 +43,15 @@ const navItems = [
  * Sidebar — Left-side navigation panel for the admin dashboard.
  *
  * Renders the application branding, a vertical list of navigation buttons,
- * and bottom controls for settings and sidebar collapse.
+ * and bottom controls for settings access.
  *
  * @param currentPage — ID of the currently active page
  * @param onNavigate — Callback to switch to a different page
- * @param collapsed — Boolean showing if the sidebar is collapsed
- * @param onToggleCollapse — Callback to collapse/expand
  * @param onOpenSettings — Callback to open settings floating modal
  */
-export function Sidebar({ currentPage, onNavigate, collapsed, onToggleCollapse, onOpenSettings }: SidebarProps) {
+export function Sidebar({ currentPage, onNavigate, onOpenSettings }: SidebarProps) {
   return (
-    <aside className={`sidebar ${collapsed ? 'collapsed' : ''}`}>
+    <aside className="sidebar">
       {/* Branding section — logo image and app name */}
       <div className="sidebar-brand">
         <img src="/plp.png" alt="Logo" className="sidebar-logo" />
@@ -75,7 +69,6 @@ export function Sidebar({ currentPage, onNavigate, collapsed, onToggleCollapse, 
             /* Apply 'active' class when this item matches the current page */
             className={`nav-item ${currentPage === item.id ? 'active' : ''}`}
             onClick={() => onNavigate(item.id)}
-            title={collapsed ? item.label : undefined}
           >
             {/* Icon component with consistent 18px size */}
             <item.Icon size={18} className="nav-icon" />
@@ -84,7 +77,7 @@ export function Sidebar({ currentPage, onNavigate, collapsed, onToggleCollapse, 
         ))}
       </nav>
 
-      {/* Footer section with Settings and Collapse buttons */}
+      {/* Footer section with Settings access only */}
       <div className="sidebar-bottom">
         <button
           className="sidebar-footer-btn"
@@ -93,15 +86,6 @@ export function Sidebar({ currentPage, onNavigate, collapsed, onToggleCollapse, 
         >
           <IconSettings size={18} className="nav-icon" />
           <span className="sidebar-footer-btn-label">Settings</span>
-        </button>
-
-        <button
-          className="sidebar-footer-btn"
-          onClick={onToggleCollapse}
-          title={collapsed ? "Expand Sidebar" : "Collapse Sidebar"}
-        >
-          {collapsed ? <IconArrowRight size={18} className="nav-icon" /> : <IconArrowLeft size={18} className="nav-icon" />}
-          <span className="sidebar-footer-btn-label">Collapse</span>
         </button>
       </div>
     </aside>

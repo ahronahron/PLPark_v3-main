@@ -432,11 +432,11 @@ export function Dashboard() {
                   <label>Parking Duration (hrs)</label>
                   <input type="number" step="0.5" value={paymentForm.duration} onChange={e => setPaymentForm({ ...paymentForm, duration: e.target.value })} placeholder="2.5" />
                 </div>
-                <div className="form-group">
+                <div className="form-group full-width">
                   <label>Hourly Rate (₱)</label>
                   <input type="number" value={paymentForm.rate} onChange={e => setPaymentForm({ ...paymentForm, rate: e.target.value })} />
                 </div>
-                <div className="form-group">
+                <div className="form-group full-width">
                   <label>Payment Method</label>
                   <select value={paymentForm.method} onChange={e => setPaymentForm({ ...paymentForm, method: e.target.value as any })}>
                     <option value="cash">Cash</option>

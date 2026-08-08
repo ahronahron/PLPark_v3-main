@@ -42,7 +42,6 @@ const pageTitles: Record<string, string> = {
  * State:
  * - `page`: Currently active admin page ID (defaults to 'dashboard').
  * - `view`: Whether showing 'admin' dashboard or 'mobile' public app.
- * - `sidebarCollapsed`: Whether the left sidebar navigation is collapsed.
  * - `isSettingsOpen`: Whether the floating settings modal overlay is open.
  *
  * @returns The complete application UI.
@@ -53,9 +52,6 @@ function App() {
 
   /** Tracks whether the admin dashboard or mobile app is displayed */
   const [view, setView] = useState<'admin' | 'mobile'>('admin');
-
-  /** Tracks if the sidebar navigation is collapsed */
-  const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
 
   /** Tracks if the settings floating modal overlay is open */
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
@@ -127,8 +123,6 @@ function App() {
         <Sidebar
           currentPage={page}
           onNavigate={setPage}
-          collapsed={sidebarCollapsed}
-          onToggleCollapse={() => setSidebarCollapsed(!sidebarCollapsed)}
           onOpenSettings={() => setIsSettingsOpen(true)}
         />
 
