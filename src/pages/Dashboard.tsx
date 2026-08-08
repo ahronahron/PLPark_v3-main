@@ -13,9 +13,11 @@
  * All data is fetched from Supabase on component mount and displayed
  * in a responsive grid layout.
  */
-import { useEffect, useState } from 'react';
+import { useEffect, useState, useCallback } from 'react';
 import { supabase, type ParkingSlot, type Camera, type PlateRecognition, type ParkingSession, type VehicleType, type Direction } from '@/lib/supabase';
 import { IconCar, IconMotorcycle, IconCamera, IconPlus, IconPayment, IconClock } from '@/components/Icons';
+import { CameraFeed } from '@/components/CameraFeed';
+import type { EntranceResult, ExitResult } from '@/lib/visionEngine';
 
 /**
  * getCurrentDateTimeLocal — Helper to get current local date/time formatted
@@ -118,6 +120,29 @@ export function Dashboard() {
     .filter(s => s.status === 'available' && s.vehicle_type === manualForm.type)
     .map(s => s.slot_id);
   const payTotal = parseFloat(paymentForm.duration || '0') * parseFloat(paymentForm.rate || '0');
+
+  // ============================================================
+  // VISION PIPELINE CALLBACKS
+  // ============================================================
+
+  /** Refresh recognitions and sessions from DB after a vision event */
+  const refreshAfterDetection = useCallback(() => {
+    supabase.from('plate_recognitions').select('*').order('created_at', { ascending: false }).limit(12).then(({ data }) => setRecognitions(data || []));
+    supabase.from('parking_sessions').select('*').order('created_at', { ascending: false }).then(({ data }) => setSessions(data || []));
+    supabase.from('parking_slots').select('*').order('slot_id').then(({ data }) => setSlots(data || []));
+  }, []);
+
+  /** Called when entrance vision pipeline confirms a vehicle */
+  const handleEntranceResult = useCallback((result: EntranceResult) => {
+    console.log('[Dashboard] Entrance result:', result.plateNumber);
+    refreshAfterDetection();
+  }, [refreshAfterDetection]);
+
+  /** Called when exit vision pipeline completes a session */
+  const handleExitResult = useCallback((result: ExitResult) => {
+    console.log('[Dashboard] Exit result:', result.plateNumber, '₱' + result.totalAmount);
+    refreshAfterDetection();
+  }, [refreshAfterDetection]);
 
   // ============================================================
   // MUTATION WORKFLOWS
@@ -287,16 +312,23 @@ export function Dashboard() {
           <div className="camera-feed">
             <div className="camera-feed-header">
               <span className="live-badge"><span className="live-dot" /> LIVE</span>
-              <span className="camera-name">{activeCamera ? activeCamera.name : 'Select a camera'}</span>
+              <span className="camera-name">{cameraTab === 'entrance' ? 'Entrance Camera' : cameraTab === 'exit' ? 'Exit Camera' : 'Slot Monitor'}</span>
               <span className="camera-timestamp">{liveTimestamp}</span>
             </div>
             <div className="camera-feed-body">
-              <div className="camera-placeholder">
-                <IconCamera size={42} className="camera-placeholder-icon" />
-                <div className="camera-placeholder-text">{activeCamera ? activeCamera.location || 'Live feed' : 'No camera selected'}</div>
-                {activeCamera && !activeCamera.is_online && <div className="camera-offline">Camera Offline</div>}
-              </div>
-              <div className="camera-overlay-grid" />
+              {(cameraTab === 'entrance' || cameraTab === 'exit') ? (
+                <CameraFeed
+                  mode={cameraTab as 'entrance' | 'exit'}
+                  onEntranceResult={handleEntranceResult}
+                  onExitResult={handleExitResult}
+                />
+              ) : (
+                <div className="camera-placeholder">
+                  <IconCamera size={42} className="camera-placeholder-icon" />
+                  <div className="camera-placeholder-text">{activeCamera ? activeCamera.location || 'Live feed' : 'No camera selected'}</div>
+                  {activeCamera && !activeCamera.is_online && <div className="camera-offline">Camera Offline</div>}
+                </div>
+              )}
             </div>
           </div>
         </div>

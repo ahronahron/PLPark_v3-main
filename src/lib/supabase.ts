@@ -152,6 +152,7 @@ export interface ParkingSession {
   vehicle_type: VehicleType;
   color: string | null;
   image_url: string | null;
+  plate_image_url: string | null;
   concept: ConceptType;
   entry_camera: string | null;
   exit_camera: string | null;
