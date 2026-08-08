@@ -15,65 +15,78 @@
  */
 import { useEffect, useState } from 'react';
 import { supabase, type ParkingSlot, type Camera, type PlateRecognition, type ParkingSession, type VehicleType, type Direction } from '@/lib/supabase';
-import { IconCar, IconMotorcycle, IconCamera, IconClock } from '@/components/Icons';
+import { IconCar, IconMotorcycle, IconCamera, IconPlus, IconPayment, IconClock } from '@/components/Icons';
 
 /**
- * Dashboard — Main dashboard component.
+ * getCurrentDateTimeLocal — Helper to get current local date/time formatted
+ * for a datetime-local input (YYYY-MM-DDTHH:MM).
  *
- * Fetches data from four tables (parking_slots, cameras, plate_recognitions,
- * parking_sessions) plus system settings on mount. Computes derived metrics
- * like available capacity and renders the complete dashboard grid.
+ * @returns {string} The formatted datetime string.
+ */
+const getCurrentDateTimeLocal = (): string => {
+  const tzoffset = (new Date()).getTimezoneOffset() * 60000;
+  const localISOTime = (new Date(Date.now() - tzoffset)).toISOString().slice(0, 16);
+  return localISOTime;
+};
+
+/**
+ * Dashboard — Main Admin Dashboard Page
  *
- * @returns The dashboard page UI with capacity cards, camera feed, recognition panel, and manual entry form
+ * Provides capacity overviews, active sessions, quick action modals for manual entry
+ * and payments, live camera feed tabs, and recent plate detection logs.
+ *
+ * @returns The dashboard page UI.
  */
 export function Dashboard() {
-  /** All parking slots — used to compute occupied vs. available counts */
+  // ============================================================
+  // STATE MANAGEMENT
+  // ============================================================
   const [slots, setSlots] = useState<ParkingSlot[]>([]);
-
-  /** All camera configurations — filtered by type for the camera panel tabs */
   const [cameras, setCameras] = useState<Camera[]>([]);
-
-  /** Recent plate recognition events — displayed in the recognition panel */
   const [recognitions, setRecognitions] = useState<PlateRecognition[]>([]);
-
-  /** All parking sessions — used for active session count */
   const [sessions, setSessions] = useState<ParkingSession[]>([]);
-
-  /** Currently selected camera in the feed viewer (null = no selection) */
   const [activeCamera, setActiveCamera] = useState<Camera | null>(null);
-
-  /** Active camera list tab — filters cameras by their functional role */
   const [cameraTab, setCameraTab] = useState<'entrance' | 'exit' | 'slot'>('entrance');
-
-  /** Maximum car capacity — loaded from system settings */
   const [maxCars, setMaxCars] = useState(30);
-
-  /** Maximum motorcycle capacity — loaded from system settings */
   const [maxMotos, setMaxMotos] = useState(20);
 
-  /** Manual entry form state — tracks all form field values */
-  const [manualForm, setManualForm] = useState({ plate: '', type: 'car' as VehicleType, direction: 'entry' as Direction, time: '', slot: '' });
+  /** Modal triggers */
+  const [isEntryModalOpen, setIsEntryModalOpen] = useState(false);
+  const [isPaymentModalOpen, setIsPaymentModalOpen] = useState(false);
 
-  /** Status message displayed after a manual save attempt */
+  /** Status messages */
   const [saveStatus, setSaveStatus] = useState('');
+  const [payStatus, setPayStatus] = useState('');
 
   /**
-   * Initial data fetch — runs once on component mount.
-   *
-   * Fetches from five Supabase tables in parallel:
-   * 1. parking_slots — ordered by slot_id for grid display
-   * 2. cameras — ordered by name for the camera list
-   * 3. plate_recognitions — last 12 events, newest first
-   * 4. parking_sessions — all sessions, newest first
-   * 5. settings — key-value pairs for capacity limits
+   * Manual Entry Form State — Uses global draft persistence from localStorage.
+   * Defaults to empty fields and current system time.
    */
+  const [manualForm, setManualForm] = useState(() => {
+    const saved = localStorage.getItem('plp_draft_manual_entry');
+    return saved ? JSON.parse(saved) : { plate: '', type: 'car' as VehicleType, direction: 'entry' as Direction, time: getCurrentDateTimeLocal(), slot: '' };
+  });
+
+  /**
+   * Manual Payment Form State — Uses global draft persistence from localStorage.
+   * Defaults to empty fields, ₱50 rate, and cash payment method.
+   */
+  const [paymentForm, setPaymentForm] = useState(() => {
+    const saved = localStorage.getItem('plp_draft_manual_payment');
+    return saved ? JSON.parse(saved) : { plate: '', duration: '', rate: '50', method: 'cash' as any };
+  });
+
+  // ============================================================
+  // SIDE-EFFECTS & PERSISTENCE
+  // ============================================================
+
+  /** Fetch initial database records and configuration settings */
   useEffect(() => {
     supabase.from('parking_slots').select('*').order('slot_id').then(({ data }) => setSlots(data || []));
     supabase.from('cameras').select('*').order('name').then(({ data }) => setCameras(data || []));
     supabase.from('plate_recognitions').select('*').order('created_at', { ascending: false }).limit(12).then(({ data }) => setRecognitions(data || []));
     supabase.from('parking_sessions').select('*').order('created_at', { ascending: false }).then(({ data }) => setSessions(data || []));
 
-    // Load system settings (max capacities) from the key-value settings table
     supabase.from('settings').select('key, value').then(({ data }) => {
       if (data) {
         const m = Object.fromEntries(data.map((r: any) => [r.key, r.value]));
@@ -83,51 +96,56 @@ export function Dashboard() {
     });
   }, []);
 
-  // ============================================================
-  // DERIVED METRICS — Computed from fetched data
-  // ============================================================
+  /** Save Manual Entry Form drafts to localStorage on change */
+  useEffect(() => {
+    localStorage.setItem('plp_draft_manual_entry', JSON.stringify(manualForm));
+  }, [manualForm]);
 
-  /** Count of car slots currently occupied */
+  /** Save Manual Payment Form drafts to localStorage on change */
+  useEffect(() => {
+    localStorage.setItem('plp_draft_manual_payment', JSON.stringify(paymentForm));
+  }, [paymentForm]);
+
+  // ============================================================
+  // COMPUTED PROPERTIES
+  // ============================================================
   const occupiedCarSlots = slots.filter(s => s.vehicle_type === 'car' && s.status === 'occupied').length;
-
-  /** Count of motorcycle slots currently occupied */
   const occupiedMotoSlots = slots.filter(s => s.vehicle_type === 'motorcycle' && s.status === 'occupied').length;
-
-  /** Available car spaces (max capacity minus occupied) */
   const availableCars = maxCars - occupiedCarSlots;
-
-  /** Available motorcycle spaces (max capacity minus occupied) */
   const availableMotos = maxMotos - occupiedMotoSlots;
-
-  /** Cameras filtered by the currently selected tab (entrance/exit/slot) */
   const filteredCameras = cameras.filter(c => c.type === cameraTab);
+  const payTotal = parseFloat(paymentForm.duration || '0') * parseFloat(paymentForm.rate || '0');
+
+  // ============================================================
+  // MUTATION WORKFLOWS
+  // ============================================================
 
   /**
-   * handleManualSave — Handles the "Save" button click for manual vehicle entry.
+   * handleManualSave — Submits a manual vehicle entry event.
    *
-   * Validates that a plate number is provided, then inserts a new record
-   * into the `plate_recognitions` table with:
-   * - Uppercase plate number
-   * - Selected vehicle type and direction
-   * - 100% confidence (manual entries are always considered certain)
-   * - "Manual Entry" as the camera name
-   * - Either the user-specified time or current system time
+   * Validates:
+   * 1. Plate number presence.
+   * 2. Alphanumeric formatting.
+   * 3. Character length constraint (between 3 and 8).
    *
-   * After successful insert:
-   * 1. Shows a success message for 3 seconds
-   * 2. Clears the form
-   * 3. Refreshes the recognition panel data
+   * Saves to database and schedules success feedback.
    */
   const handleManualSave = async () => {
-    // Validate required field
-    if (!manualForm.plate) { setSaveStatus('Plate number required'); return; }
+    const formattedPlate = manualForm.plate.toUpperCase().replace(/[^A-Z0-9 -]/g, '').trim();
 
-    // Use form time if provided, otherwise default to current system time
+    if (!formattedPlate) {
+      setSaveStatus('Plate number is required.');
+      return;
+    }
+    if (formattedPlate.length < 3 || formattedPlate.length > 8) {
+      setSaveStatus('Plate number must be between 3 and 8 characters.');
+      return;
+    }
+
     const time = manualForm.time || new Date().toISOString();
 
-    // Insert the manual plate recognition record
     const { error } = await supabase.from('plate_recognitions').insert({
-      plate_number: manualForm.plate.toUpperCase(),
+      plate_number: formattedPlate,
       vehicle_type: manualForm.type,
       direction: manualForm.direction,
       confidence: 100,
@@ -135,92 +153,157 @@ export function Dashboard() {
       created_at: time,
     });
 
-    if (error) { setSaveStatus('Error saving'); return; }
+    if (error) {
+      setSaveStatus('Error saving: ' + error.message);
+      return;
+    }
 
-    // Show success feedback and reset form
-    setSaveStatus('Saved successfully');
-    setManualForm({ plate: '', type: 'car', direction: 'entry', time: '', slot: '' });
+    setSaveStatus('Saved successfully.');
+    setManualForm({ plate: '', type: 'car', direction: 'entry', time: getCurrentDateTimeLocal(), slot: '' });
+    localStorage.removeItem('plp_draft_manual_entry');
 
-    // Auto-clear the status message after 3 seconds
-    setTimeout(() => setSaveStatus(''), 3000);
+    setTimeout(() => {
+      setSaveStatus('');
+      setIsEntryModalOpen(false);
+    }, 1500);
 
-    // Refresh the recognition panel with latest data
+    // Refresh recognitions
     supabase.from('plate_recognitions').select('*').order('created_at', { ascending: false }).limit(12).then(({ data }) => setRecognitions(data || []));
   };
 
-  /** Current system time formatted as HH:MM:SS for the camera feed timestamp */
+  /**
+   * handleProcessPayment — Submits a manual payment event.
+   *
+   * Validates:
+   * 1. Plate number presence and bounds.
+   * 2. Duration presence.
+   *
+   * Saves to database and schedules success feedback.
+   */
+  const handleProcessPayment = async () => {
+    const formattedPlate = paymentForm.plate.toUpperCase().replace(/[^A-Z0-9 -]/g, '').trim();
+
+    if (!formattedPlate) {
+      setPayStatus('Plate number is required.');
+      return;
+    }
+    if (formattedPlate.length < 3 || formattedPlate.length > 8) {
+      setPayStatus('Plate must be between 3 and 8 characters.');
+      return;
+    }
+    if (!paymentForm.duration || parseFloat(paymentForm.duration) <= 0) {
+      setPayStatus('Valid duration is required.');
+      return;
+    }
+
+    // Fetch existing payment count to build unique receipt sequence
+    const { data: countData } = await supabase.from('payments').select('id');
+    const receiptNum = `RCP-2024-${String((countData?.length || 0) + 1).padStart(4, '0')}`;
+
+    const { error } = await supabase.from('payments').insert({
+      receipt_number: receiptNum,
+      plate_number: formattedPlate,
+      duration_hours: parseFloat(paymentForm.duration),
+      hourly_rate: parseFloat(paymentForm.rate),
+      total_amount: payTotal,
+      payment_method: paymentForm.method,
+      status: 'completed',
+      processed_by: 'admin',
+    });
+
+    if (error) {
+      setPayStatus('Error processing: ' + error.message);
+      return;
+    }
+
+    setPayStatus(`Payment Successful. Receipt: ${receiptNum}`);
+    setPaymentForm({ plate: '', duration: '', rate: '50', method: 'cash' });
+    localStorage.removeItem('plp_draft_manual_payment');
+
+    setTimeout(() => {
+      setPayStatus('');
+      setIsPaymentModalOpen(false);
+    }, 2000);
+  };
+
   const liveTimestamp = new Date().toLocaleTimeString('en-US', { hour12: false });
 
   // ============================================================
-  // RENDER — Dashboard grid layout
+  // RENDER UI
   // ============================================================
   return (
     <div className="dashboard-grid">
 
-      {/* ===== ROW 1: CAPACITY CARDS ===== */}
+      {/* ===== ROW 1: CAPACITY CARDS & QUICK ACTIONS ===== */}
       <div className="capacity-row">
-        {/* Car capacity card — shows available spaces and max */}
-        <div className="capacity-card">
+        {/* Compact Car capacity card */}
+        <div className="capacity-card compact">
           <div className="capacity-header">
-            <IconCar size={22} className="capacity-icon" />
+            <IconCar size={18} className="capacity-icon" />
             <span className="capacity-label">Cars</span>
           </div>
           <div className="capacity-value available">{availableCars} Available</div>
           <div className="capacity-max">{maxCars} max capacity</div>
         </div>
 
-        {/* Motorcycle capacity card — shows available spaces and max */}
-        <div className="capacity-card">
+        {/* Compact Motorcycle capacity card */}
+        <div className="capacity-card compact">
           <div className="capacity-header">
-            <IconMotorcycle size={22} className="capacity-icon" />
+            <IconMotorcycle size={18} className="capacity-icon" />
             <span className="capacity-label">Motorcycles</span>
           </div>
           <div className="capacity-value available">{availableMotos} Available</div>
           <div className="capacity-max">{maxMotos} max capacity</div>
         </div>
 
-        {/* Mini stats card — active sessions and total slots */}
-        <div className="capacity-mini">
+        {/* Compact Mini stats card */}
+        <div className="capacity-mini compact">
           <div className="mini-row"><span>Active Sessions</span><span className="mini-value">{sessions.filter(s => s.status === 'active').length}</span></div>
           <div className="mini-row"><span>Total Slots</span><span className="mini-value">{slots.length}</span></div>
         </div>
+
+        {/* Quick Actions Card (Upper-Right dashboard position) */}
+        <div className="quick-actions-card">
+          <div className="quick-actions-title">Quick Actions</div>
+          <div className="quick-actions-grid">
+            <button className="quick-action-btn" onClick={() => setIsEntryModalOpen(true)}>
+              <IconPlus size={16} />
+              <span>Manual Entry</span>
+            </button>
+            <button className="quick-action-btn" onClick={() => setIsPaymentModalOpen(true)}>
+              <IconPayment size={16} />
+              <span>Manual Payment</span>
+            </button>
+          </div>
+        </div>
       </div>
 
-      {/* ===== ROW 2: CAMERA FEED + TABS + RECOGNITION PANEL ===== */}
+      {/* ===== ROW 2: CAMERA FEED + RECOGNITION PANEL ===== */}
       <div className="camera-row">
-        {/* Main camera feed viewer — shows selected camera's live feed */}
         <div className="camera-main">
           <div className="camera-feed">
             <div className="camera-feed-header">
-              {/* Live indicator badge */}
               <span className="live-badge"><span className="live-dot" /> LIVE</span>
-              {/* Active camera name or placeholder */}
               <span className="camera-name">{activeCamera ? activeCamera.name : 'Select a camera'}</span>
-              {/* Current timestamp */}
               <span className="camera-timestamp">{liveTimestamp}</span>
             </div>
             <div className="camera-feed-body">
-              {/* Placeholder content — replaced by actual video feed when camera hardware is connected */}
               <div className="camera-placeholder">
                 <IconCamera size={42} className="camera-placeholder-icon" />
                 <div className="camera-placeholder-text">{activeCamera ? activeCamera.location || 'Live feed' : 'No camera selected'}</div>
-                {/* Offline warning when a selected camera is not connected */}
                 {activeCamera && !activeCamera.is_online && <div className="camera-offline">Camera Offline</div>}
               </div>
-              {/* Grid overlay for visual alignment reference */}
               <div className="camera-overlay-grid" />
             </div>
           </div>
         </div>
 
-        {/* Camera selection tabs and list — filters by Entrance/Exit/Slot */}
         <div className="camera-tabs-panel">
           <div className="camera-tabs">
             <button className={cameraTab === 'entrance' ? 'active' : ''} onClick={() => setCameraTab('entrance')}>Entrance</button>
             <button className={cameraTab === 'exit' ? 'active' : ''} onClick={() => setCameraTab('exit')}>Exit</button>
             <button className={cameraTab === 'slot' ? 'active' : ''} onClick={() => setCameraTab('slot')}>Slots</button>
           </div>
-          {/* Scrollable list of cameras matching the active tab */}
           <div className="camera-list">
             {filteredCameras.map(cam => (
               <button
@@ -228,11 +311,9 @@ export function Dashboard() {
                 className={`camera-list-item ${activeCamera?.id === cam.id ? 'selected' : ''}`}
                 onClick={() => setActiveCamera(cam)}
               >
-                {/* Online/offline status indicator dot */}
                 <span className={`cam-status ${cam.is_online ? 'online' : 'offline'}`} />
                 <div className="cam-info">
                   <div className="cam-name">{cam.name}</div>
-                  {/* Slot range label (only for slot-type cameras) */}
                   {cam.slot_range && <div className="cam-slot-range">Slot {cam.slot_range}</div>}
                   <div className="cam-location">{cam.location}</div>
                 </div>
@@ -242,13 +323,11 @@ export function Dashboard() {
           </div>
         </div>
 
-        {/* Plate Recognition panel — scrollable list of recent OCR events */}
         <div className="recognition-panel">
           <div className="panel-header">Plate Recognition</div>
           <div className="recognition-list">
             {recognitions.map(r => (
               <div key={r.id} className="recognition-item">
-                {/* Plate number displayed prominently */}
                 <div className="rec-plate">{r.plate_number}</div>
                 <div className="rec-details">
                   <div className="rec-row"><span className="rec-label">Type</span><span className="rec-value">{r.vehicle_type}</span></div>
@@ -265,50 +344,115 @@ export function Dashboard() {
         </div>
       </div>
 
-      {/* ===== ROW 3: MANUAL VEHICLE ENTRY FORM ===== */}
-      <div className="manual-entry-card">
-        <div className="panel-header">Manual Vehicle Entry</div>
-        <div className="manual-form">
-          {/* Plate number input */}
-          <div className="form-group">
-            <label>Plate Number</label>
-            <input value={manualForm.plate} onChange={e => setManualForm({ ...manualForm, plate: e.target.value })} placeholder="ABC 1234" />
+      {/* ===== FLOATING MANUAL ENTRY MODAL ===== */}
+      {isEntryModalOpen && (
+        <div className="modal-overlay" onClick={() => setIsEntryModalOpen(false)}>
+          <div className="modal-container" onClick={e => e.stopPropagation()}>
+            <div className="modal-header">
+              <h3>Manual Vehicle Entry</h3>
+              <button className="close-btn" onClick={() => setIsEntryModalOpen(false)}>×</button>
+            </div>
+            <div className="modal-body">
+              <div className="form-group">
+                <label>Plate Number</label>
+                <input
+                  value={manualForm.plate}
+                  onChange={e => setManualForm({ ...manualForm, plate: e.target.value.toUpperCase().replace(/[^A-Z0-9 -]/g, '').slice(0, 8) })}
+                  placeholder="ABC 1234"
+                  maxLength={8}
+                />
+                <span className="form-hint">Enforces uppercase alphanumeric (3-8 chars).</span>
+              </div>
+              <div className="form-group">
+                <label>Vehicle Type</label>
+                <select value={manualForm.type} onChange={e => setManualForm({ ...manualForm, type: e.target.value as VehicleType })}>
+                  <option value="car">Car</option>
+                  <option value="motorcycle">Motorcycle</option>
+                </select>
+              </div>
+              <div className="form-group">
+                <label>Entry / Exit</label>
+                <select value={manualForm.direction} onChange={e => setManualForm({ ...manualForm, direction: e.target.value as Direction })}>
+                  <option value="entry">Entry</option>
+                  <option value="exit">Exit</option>
+                </select>
+              </div>
+              <div className="form-group">
+                <label>Time</label>
+                <input type="datetime-local" value={manualForm.time} onChange={e => setManualForm({ ...manualForm, time: e.target.value })} />
+                <span className="form-hint">Defaults to current local time; fully editable.</span>
+              </div>
+              <div className="form-group">
+                <label>Assigned Slot (optional)</label>
+                <input value={manualForm.slot} onChange={e => setManualForm({ ...manualForm, slot: e.target.value })} placeholder="A1" />
+              </div>
+              <div className="form-actions" style={{ marginTop: '20px', justifyContent: 'flex-end' }}>
+                <button className="btn-secondary" onClick={() => {
+                  setManualForm({ plate: '', type: 'car', direction: 'entry', time: getCurrentDateTimeLocal(), slot: '' });
+                  localStorage.removeItem('plp_draft_manual_entry');
+                }}>Clear Draft</button>
+                <button className="btn-primary" onClick={handleManualSave}>Save Entry</button>
+              </div>
+              {saveStatus && <div className={`save-status ${saveStatus.includes('Error') || saveStatus.includes('must be') ? 'error' : 'success'}`} style={{ marginTop: '12px' }}>{saveStatus}</div>}
+            </div>
           </div>
-          {/* Vehicle type selector */}
-          <div className="form-group">
-            <label>Vehicle Type</label>
-            <select value={manualForm.type} onChange={e => setManualForm({ ...manualForm, type: e.target.value as VehicleType })}>
-              <option value="car">Car</option>
-              <option value="motorcycle">Motorcycle</option>
-            </select>
-          </div>
-          {/* Entry/Exit direction selector */}
-          <div className="form-group">
-            <label>Entry / Exit</label>
-            <select value={manualForm.direction} onChange={e => setManualForm({ ...manualForm, direction: e.target.value as Direction })}>
-              <option value="entry">Entry</option>
-              <option value="exit">Exit</option>
-            </select>
-          </div>
-          {/* Timestamp input — defaults to current time if left empty */}
-          <div className="form-group">
-            <label>Time</label>
-            <input type="datetime-local" value={manualForm.time} onChange={e => setManualForm({ ...manualForm, time: e.target.value })} />
-          </div>
-          {/* Optional slot assignment */}
-          <div className="form-group">
-            <label>Assigned Slot (optional)</label>
-            <input value={manualForm.slot} onChange={e => setManualForm({ ...manualForm, slot: e.target.value })} placeholder="A1" />
-          </div>
-          {/* Form action buttons */}
-          <div className="form-actions">
-            <button className="btn-primary" onClick={handleManualSave}>Save</button>
-            <button className="btn-secondary" onClick={() => setManualForm({ plate: '', type: 'car', direction: 'entry', time: '', slot: '' })}>Clear</button>
-          </div>
-          {/* Save status message — shows success or error */}
-          {saveStatus && <div className={`save-status ${saveStatus.includes('Error') ? 'error' : 'success'}`}>{saveStatus}</div>}
         </div>
-      </div>
+      )}
+
+      {/* ===== FLOATING MANUAL PAYMENT MODAL ===== */}
+      {isPaymentModalOpen && (
+        <div className="modal-overlay" onClick={() => setIsPaymentModalOpen(false)}>
+          <div className="modal-container" onClick={e => e.stopPropagation()}>
+            <div className="modal-header">
+              <h3>Process Manual Payment</h3>
+              <button className="close-btn" onClick={() => setIsPaymentModalOpen(false)}>×</button>
+            </div>
+            <div className="modal-body">
+              <div className="payment-form-compact">
+                <div className="form-group">
+                  <label>Plate Number</label>
+                  <input
+                    value={paymentForm.plate}
+                    onChange={e => setPaymentForm({ ...paymentForm, plate: e.target.value.toUpperCase().replace(/[^A-Z0-9 -]/g, '').slice(0, 8) })}
+                    placeholder="ABC 1234"
+                    maxLength={8}
+                  />
+                </div>
+                <div className="form-group">
+                  <label>Parking Duration (hrs)</label>
+                  <input type="number" step="0.5" value={paymentForm.duration} onChange={e => setPaymentForm({ ...paymentForm, duration: e.target.value })} placeholder="2.5" />
+                </div>
+                <div className="form-group">
+                  <label>Hourly Rate (₱)</label>
+                  <input type="number" value={paymentForm.rate} onChange={e => setPaymentForm({ ...paymentForm, rate: e.target.value })} />
+                </div>
+                <div className="form-group">
+                  <label>Payment Method</label>
+                  <select value={paymentForm.method} onChange={e => setPaymentForm({ ...paymentForm, method: e.target.value as any })}>
+                    <option value="cash">Cash</option>
+                    <option value="gcash">GCash</option>
+                    <option value="card">Card</option>
+                  </select>
+                </div>
+                <div className="form-group full-width" style={{ marginTop: '8px' }}>
+                  <label>Total Amount</label>
+                  <div className="total-amount" style={{ padding: '4px 0' }}>₱{payTotal.toFixed(2)}</div>
+                </div>
+              </div>
+              <div className="form-actions" style={{ marginTop: '20px', justifyContent: 'flex-end' }}>
+                <button className="btn-secondary" onClick={() => {
+                  setPaymentForm({ plate: '', duration: '', rate: '50', method: 'cash' });
+                  localStorage.removeItem('plp_draft_manual_payment');
+                }}>Clear Draft</button>
+                <button className="btn-primary" onClick={handleProcessPayment}>Process Payment</button>
+              </div>
+              {payStatus && <div className={`save-status ${payStatus.includes('Error') || payStatus.includes('must be') ? 'error' : 'success'}`} style={{ marginTop: '12px' }}>{payStatus}</div>}
+            </div>
+          </div>
+        </div>
+      )}
+
     </div>
   );
 }
+

@@ -1,30 +1,58 @@
+/**
+ * Settings.tsx — Floating System Settings Panel Component
+ *
+ * This component renders the tabbed interface for system configuration.
+ * It connects to Supabase settings, camera, and activity logs.
+ *
+ * Integrated tabs:
+ * 1. **Cameras & Vision** — Unified camera setup and plate recognition settings.
+ * 2. **Parking Handling** — Consolidated rates, receipt templates, and payment gateways in a side-by-side layout.
+ * 3. **Notifications** — Toggles for system alert events.
+ * 4. **Backup & Restore** — Data export/import commands.
+ * 5. **Activity Logs** — Searchable audit logs.
+ *
+ * Cleanups:
+ * - Hardcoded currency symbol to ₱ (removed input).
+ * - Removed User Permissions / RBAC selector.
+ */
 import { useEffect, useState } from 'react';
 import { supabase } from '@/lib/supabase';
 import {
-  IconCameraConfig, IconScan, IconRates, IconReceipt, IconPayment, IconBackup,
-  IconShield, IconNotifications, IconLogs, IconCheck, IconSearch, IconDownload
+  IconCameraConfig, IconRates, IconBackup,
+  IconNotifications, IconLogs, IconSearch, IconDownload
 } from '@/components/Icons';
 
+/** Icon map for settings section tabs */
 const sectionIcons: Record<string, any> = {
-  camera: IconCameraConfig,
-  plate: IconScan,
-  rates: IconRates,
-  receipt: IconReceipt,
-  payment: IconPayment,
-  backup: IconBackup,
-  permissions: IconShield,
+  camera_vision: IconCameraConfig,
+  parking_handling: IconRates,
   notifications: IconNotifications,
+  backup: IconBackup,
   logs: IconLogs,
 };
 
+/**
+ * Settings — Panel component containing configuration forms.
+ *
+ * State:
+ * - `activeSection`: Current settings tab ('camera_vision' | 'parking_handling' | ...)
+ * - `settings`: Key-value configuration object loaded from settings table.
+ * - `cameras`: Array of camera sources.
+ * - `logs`: System activity audit logs.
+ * - `logSearch`: Query for filtering logs.
+ * - `saveMsg`: Transient success status message.
+ *
+ * @returns Settings layout.
+ */
 export function Settings() {
-  const [activeSection, setActiveSection] = useState('camera');
+  const [activeSection, setActiveSection] = useState('camera_vision');
   const [settings, setSettings] = useState<Record<string, any>>({});
   const [cameras, setCameras] = useState<any[]>([]);
   const [logs, setLogs] = useState<any[]>([]);
   const [logSearch, setLogSearch] = useState('');
   const [saveMsg, setSaveMsg] = useState('');
 
+  /** Fetch configuration and cameras from Supabase on mount */
   useEffect(() => {
     supabase.from('settings').select('key, value').then(({ data }) => {
       if (data) setSettings(Object.fromEntries(data.map((r: any) => [r.key, r.value])));
@@ -33,32 +61,39 @@ export function Settings() {
     supabase.from('activity_logs').select('*').order('created_at', { ascending: false }).limit(50).then(({ data }) => setLogs(data || []));
   }, []);
 
+  /**
+   * saveSetting — Persists key-value settings changes to Supabase settings table.
+   * Displays a toast notification after saving.
+   *
+   * @param key — Settings record lookup key
+   * @param value — Settings record payload value
+   */
   const saveSetting = async (key: string, value: any) => {
     await supabase.from('settings').upsert({ key, value });
-    setSaveMsg(`${key} saved`);
+    setSettings(prev => ({ ...prev, [key]: value }));
+    setSaveMsg(`Setting saved successfully.`);
     setTimeout(() => setSaveMsg(''), 2000);
   };
 
+  /** Filter logs by user name, action description, or active module */
   const filteredLogs = logs.filter(l =>
     l.user_name?.toLowerCase().includes(logSearch.toLowerCase()) ||
     l.action.toLowerCase().includes(logSearch.toLowerCase()) ||
     l.module.toLowerCase().includes(logSearch.toLowerCase())
   );
 
+  /** Sections config (Permissions removed, Camera & plate unified, Rates, receipt, payment consolidated) */
   const sections = [
-    { id: 'camera', label: 'Camera Configuration' },
-    { id: 'plate', label: 'Plate Recognition' },
-    { id: 'rates', label: 'Parking Rates' },
-    { id: 'receipt', label: 'Receipt Template' },
-    { id: 'payment', label: 'Payment Methods' },
-    { id: 'backup', label: 'Backup & Restore' },
-    { id: 'permissions', label: 'User Permissions' },
+    { id: 'camera_vision', label: 'Cameras & Vision' },
+    { id: 'parking_handling', label: 'Parking Handling' },
     { id: 'notifications', label: 'Notifications' },
+    { id: 'backup', label: 'Backup & Restore' },
     { id: 'logs', label: 'Activity Logs' },
   ];
 
   return (
     <div className="settings-page">
+      {/* Sidebar navigation for settings overlay */}
       <div className="settings-sidebar">
         {sections.map(s => {
           const Icon = sectionIcons[s.id];
@@ -71,167 +106,148 @@ export function Settings() {
         })}
       </div>
 
+      {/* Settings configuration form viewport */}
       <div className="settings-content">
         {saveMsg && <div className="save-toast">{saveMsg}</div>}
 
-        {activeSection === 'camera' && (
+        {/* ===== TAB 1: CAMERAS & VISION ===== */}
+        {activeSection === 'camera_vision' && (
           <div className="settings-section">
-            <h2>Camera Configuration</h2>
-            <p className="settings-desc">Manage camera sources for entrance, exit, and slot monitoring.</p>
-            <table className="data-table">
-              <thead><tr><th>Camera Name</th><th>Type</th><th>Location</th><th>Slot Range</th><th>Status</th></tr></thead>
-              <tbody>
-                {cameras.map(c => (
-                  <tr key={c.id}>
-                    <td>{c.name}</td>
-                    <td><span className={`cam-type-badge ${c.type}`}>{c.type}</span></td>
-                    <td>{c.location}</td>
-                    <td>{c.slot_range || '—'}</td>
-                    <td><span className={`status-badge ${c.is_online ? 'completed' : 'failed'}`}>{c.is_online ? 'online' : 'offline'}</span></td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        )}
+            <h2>Cameras & Vision</h2>
+            <p className="settings-desc">Manage system video sources and plate recognition parameters.</p>
+            
+            <div style={{ display: 'flex', flexDirection: 'column', gap: '24px' }}>
+              <div>
+                <h3 style={{ fontSize: '13px', fontWeight: 600, marginBottom: '12px' }}>Camera Setup</h3>
+                <table className="data-table">
+                  <thead><tr><th>Camera Name</th><th>Type</th><th>Location</th><th>Slot Range</th><th>Status</th></tr></thead>
+                  <tbody>
+                    {cameras.map(c => (
+                      <tr key={c.id}>
+                        <td>{c.name}</td>
+                        <td><span className={`cam-type-badge ${c.type}`}>{c.type}</span></td>
+                        <td>{c.location}</td>
+                        <td>{c.slot_range || '—'}</td>
+                        <td><span className={`status-badge ${c.is_online ? 'completed' : 'failed'}`}>{c.is_online ? 'online' : 'offline'}</span></td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
 
-        {activeSection === 'plate' && (
-          <div className="settings-section">
-            <h2>Plate Recognition Settings</h2>
-            <p className="settings-desc">Configure plate detection sensitivity and confidence thresholds.</p>
-            <div className="settings-form">
-              <div className="form-group">
-                <label>Confidence Threshold (%)</label>
-                <input type="number" defaultValue={settings.plate_recognition_confidence_threshold || 85}
-                  onBlur={e => saveSetting('plate_recognition_confidence_threshold', parseInt(e.target.value))} />
-                <span className="form-hint">Plates below this confidence are flagged for review.</span>
-              </div>
-              <div className="form-group">
-                <label>Camera FPS</label>
-                <input type="number" defaultValue={settings.camera_fps || 30}
-                  onBlur={e => saveSetting('camera_fps', parseInt(e.target.value))} />
-              </div>
-            </div>
-          </div>
-        )}
-
-        {activeSection === 'rates' && (
-          <div className="settings-section">
-            <h2>Parking Rates</h2>
-            <p className="settings-desc">Set hourly rates and maximum capacity for each vehicle type.</p>
-            <div className="settings-form">
-              <div className="form-group">
-                <label>Car Hourly Rate (₱)</label>
-                <input type="number" defaultValue={settings.hourly_rate_car || 50}
-                  onBlur={e => saveSetting('hourly_rate_car', parseInt(e.target.value))} />
-              </div>
-              <div className="form-group">
-                <label>Motorcycle Hourly Rate (₱)</label>
-                <input type="number" defaultValue={settings.hourly_rate_motorcycle || 25}
-                  onBlur={e => saveSetting('hourly_rate_motorcycle', parseInt(e.target.value))} />
-              </div>
-              <div className="form-group">
-                <label>Max Capacity — Cars</label>
-                <input type="number" defaultValue={settings.max_capacity_cars || 30}
-                  onBlur={e => saveSetting('max_capacity_cars', parseInt(e.target.value))} />
-              </div>
-              <div className="form-group">
-                <label>Max Capacity — Motorcycles</label>
-                <input type="number" defaultValue={settings.max_capacity_motorcycles || 20}
-                  onBlur={e => saveSetting('max_capacity_motorcycles', parseInt(e.target.value))} />
-              </div>
-              <div className="form-group">
-                <label>Currency Symbol</label>
-                <input defaultValue={settings.currency || '₱'}
-                  onBlur={e => saveSetting('currency', e.target.value)} />
-              </div>
-            </div>
-          </div>
-        )}
-
-        {activeSection === 'receipt' && (
-          <div className="settings-section">
-            <h2>Receipt Template</h2>
-            <p className="settings-desc">Customize the header, address, and footer on printed receipts.</p>
-            <div className="settings-form">
-              <div className="form-group">
-                <label>Header Text</label>
-                <input defaultValue={settings.receipt_template?.header || 'SmartPark Parking System'}
-                  onBlur={e => saveSetting('receipt_template', { ...settings.receipt_template, header: e.target.value })} />
-              </div>
-              <div className="form-group">
-                <label>Address</label>
-                <input defaultValue={settings.receipt_template?.address || 'Pasig City, Philippines'}
-                  onBlur={e => saveSetting('receipt_template', { ...settings.receipt_template, address: e.target.value })} />
-              </div>
-              <div className="form-group">
-                <label>Footer Text</label>
-                <input defaultValue={settings.receipt_template?.footer || 'Thank you for parking with us!'}
-                  onBlur={e => saveSetting('receipt_template', { ...settings.receipt_template, footer: e.target.value })} />
-              </div>
-            </div>
-          </div>
-        )}
-
-        {activeSection === 'payment' && (
-          <div className="settings-section">
-            <h2>Payment Methods</h2>
-            <p className="settings-desc">Enable or disable payment methods available to customers.</p>
-            <div className="settings-form">
-              {['cash', 'gcash', 'card'].map(method => (
-                <div key={method} className="toggle-row">
-                  <span className="toggle-label">{method === 'gcash' ? 'GCash' : method === 'card' ? 'Credit/Debit Card' : 'Cash'}</span>
-                  <label className="toggle-switch">
-                    <input type="checkbox" defaultChecked={(settings.payment_methods || []).includes(method)}
-                      onChange={e => {
-                        const current = settings.payment_methods || [];
-                        const updated = e.target.checked ? [...current, method] : current.filter((m: string) => m !== method);
-                        saveSetting('payment_methods', updated);
-                      }} />
-                    <span className="toggle-slider" />
-                  </label>
+              <div>
+                <h3 style={{ fontSize: '13px', fontWeight: 600, marginBottom: '12px' }}>Plate Recognition Parameters</h3>
+                <div className="settings-form">
+                  <div className="form-group">
+                    <label>Confidence Threshold (%)</label>
+                    <input type="number" defaultValue={settings.plate_recognition_confidence_threshold || 85}
+                      onBlur={e => saveSetting('plate_recognition_confidence_threshold', parseInt(e.target.value))} />
+                    <span className="form-hint">Plates below this confidence are flagged for review.</span>
+                  </div>
+                  <div className="form-group">
+                    <label>Camera FPS</label>
+                    <input type="number" defaultValue={settings.camera_fps || 30}
+                      onBlur={e => saveSetting('camera_fps', parseInt(e.target.value))} />
+                  </div>
                 </div>
-              ))}
+              </div>
             </div>
           </div>
         )}
 
-        {activeSection === 'backup' && (
+        {/* ===== TAB 2: PARKING HANDLING ===== */}
+        {activeSection === 'parking_handling' && (
           <div className="settings-section">
-            <h2>Backup & Restore</h2>
-            <p className="settings-desc">Export or import system data and configuration.</p>
-            <div className="backup-actions">
-              <button className="btn-primary"><IconDownload size={15} /> Download Backup</button>
-              <button className="btn-secondary">Restore from File</button>
-              <button className="btn-secondary">Export Database</button>
+            <h2>Parking Handling</h2>
+            <p className="settings-desc">Configure rates, customize receipts, and toggle payment options.</p>
+
+            <div className="parking-handling-grid">
+              {/* Column 1: Rates & Capacities */}
+              <div className="parking-handling-col">
+                <h3 style={{ fontSize: '13px', fontWeight: 600 }}>Rates & Capacity</h3>
+                <div className="settings-form" style={{ maxWidth: '100%' }}>
+                  <div className="form-group">
+                    <label>Car Hourly Rate (₱)</label>
+                    <input type="number" defaultValue={settings.hourly_rate_car || 50}
+                      onBlur={e => saveSetting('hourly_rate_car', parseInt(e.target.value))} />
+                  </div>
+                  <div className="form-group">
+                    <label>Motorcycle Hourly Rate (₱)</label>
+                    <input type="number" defaultValue={settings.hourly_rate_motorcycle || 25}
+                      onBlur={e => saveSetting('hourly_rate_motorcycle', parseInt(e.target.value))} />
+                  </div>
+                  <div className="form-group">
+                    <label>Max Capacity — Cars</label>
+                    <input type="number" defaultValue={settings.max_capacity_cars || 30}
+                      onBlur={e => saveSetting('max_capacity_cars', parseInt(e.target.value))} />
+                  </div>
+                  <div className="form-group">
+                    <label>Max Capacity — Motorcycles</label>
+                    <input type="number" defaultValue={settings.max_capacity_motorcycles || 20}
+                      onBlur={e => saveSetting('max_capacity_motorcycles', parseInt(e.target.value))} />
+                  </div>
+                  <div className="form-group">
+                    <label>Default Currency</label>
+                    <input type="text" value="₱" disabled style={{ opacity: 0.7, background: 'var(--cursor-bg-tertiary)' }} />
+                    <span className="form-hint">Hardcoded system default (Philippine Peso).</span>
+                  </div>
+                </div>
+              </div>
+
+              {/* Column 2: Receipt & Gateways */}
+              <div className="parking-handling-col">
+                <div>
+                  <h3 style={{ fontSize: '13px', fontWeight: 600, marginBottom: '16px' }}>Receipt Customization</h3>
+                  <div className="settings-form" style={{ maxWidth: '100%' }}>
+                    <div className="form-group">
+                      <label>Header Text</label>
+                      <input defaultValue={settings.receipt_template?.header || 'SmartPark Parking System'}
+                        onBlur={e => saveSetting('receipt_template', { ...settings.receipt_template, header: e.target.value })} />
+                    </div>
+                    <div className="form-group">
+                      <label>Address</label>
+                      <input defaultValue={settings.receipt_template?.address || 'Pasig City, Philippines'}
+                        onBlur={e => saveSetting('receipt_template', { ...settings.receipt_template, address: e.target.value })} />
+                    </div>
+                    <div className="form-group">
+                      <label>Footer Text</label>
+                      <input defaultValue={settings.receipt_template?.footer || 'Thank you for parking with us!'}
+                        onBlur={e => saveSetting('receipt_template', { ...settings.receipt_template, footer: e.target.value })} />
+                    </div>
+                  </div>
+                </div>
+
+                <div style={{ marginTop: '24px' }}>
+                  <h3 style={{ fontSize: '13px', fontWeight: 600, marginBottom: '12px' }}>Payment Gateways</h3>
+                  <div className="settings-form" style={{ maxWidth: '100%' }}>
+                    {['cash', 'gcash', 'card'].map(method => (
+                      <div key={method} className="toggle-row">
+                        <span className="toggle-label" style={{ textTransform: 'capitalize' }}>
+                          {method === 'gcash' ? 'GCash' : method === 'card' ? 'Credit/Debit Card' : 'Cash'}
+                        </span>
+                        <label className="toggle-switch">
+                          <input type="checkbox" defaultChecked={(settings.payment_methods || []).includes(method)}
+                            onChange={e => {
+                              const current = settings.payment_methods || [];
+                              const updated = e.target.checked ? [...current, method] : current.filter((m: string) => m !== method);
+                              saveSetting('payment_methods', updated);
+                            }} />
+                          <span className="toggle-slider" />
+                        </label>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              </div>
             </div>
           </div>
         )}
 
-        {activeSection === 'permissions' && (
-          <div className="settings-section">
-            <h2>User Permissions</h2>
-            <p className="settings-desc">Define what each role can access within the system.</p>
-            <table className="data-table">
-              <thead><tr><th>Module</th><th>Admin</th><th>Operator</th><th>Viewer</th></tr></thead>
-              <tbody>
-                {['Dashboard', 'Payments', 'User Management', 'Statistics', 'Slot Management', 'Settings'].map(mod => (
-                  <tr key={mod}>
-                    <td>{mod}</td>
-                    <td><span className="perm-check"><IconCheck size={14} /></span></td>
-                    <td>{mod === 'Settings' || mod === 'User Management' ? <span className="perm-deny">—</span> : <span className="perm-check"><IconCheck size={14} /></span>}</td>
-                    <td>{mod === 'Payments' || mod === 'Settings' || mod === 'User Management' ? <span className="perm-deny">—</span> : <span className="perm-check"><IconCheck size={14} /></span>}</td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        )}
-
+        {/* ===== TAB 3: NOTIFICATIONS ===== */}
         {activeSection === 'notifications' && (
           <div className="settings-section">
-            <h2>Notification Settings</h2>
-            <p className="settings-desc">Choose which events trigger dashboard notifications.</p>
+            <h2>Notification Toggles</h2>
+            <p className="settings-desc">Choose which events trigger real-time dashboard notifications.</p>
             <div className="settings-form">
               {[
                 { key: 'new_vehicle', label: 'New vehicle entered' },
@@ -253,10 +269,24 @@ export function Settings() {
           </div>
         )}
 
+        {/* ===== TAB 4: BACKUP & RESTORE ===== */}
+        {activeSection === 'backup' && (
+          <div className="settings-section">
+            <h2>Backup & Restore</h2>
+            <p className="settings-desc">Export database files or download current configuration presets.</p>
+            <div className="backup-actions">
+              <button className="btn-primary" onClick={() => alert('Backup downloading')}><IconDownload size={15} /> Download Backup</button>
+              <button className="btn-secondary" onClick={() => alert('Select a file to restore')}>Restore from File</button>
+              <button className="btn-secondary" onClick={() => alert('Exporting PostgreSQL data')}>Export Database</button>
+            </div>
+          </div>
+        )}
+
+        {/* ===== TAB 5: ACTIVITY LOGS ===== */}
         {activeSection === 'logs' && (
           <div className="settings-section">
             <h2>Activity Logs</h2>
-            <p className="settings-desc">Audit trail of all user actions across the system.</p>
+            <p className="settings-desc">Audit trail of operator and viewer sessions.</p>
             <div className="search-wrapper" style={{ marginBottom: '16px' }}>
               <IconSearch size={16} className="search-prefix" />
               <input className="search-input" placeholder="Search logs..." value={logSearch} onChange={e => setLogSearch(e.target.value)} />
@@ -269,7 +299,7 @@ export function Settings() {
                     <td>{l.user_name}</td>
                     <td>{l.action}</td>
                     <td>{l.module}</td>
-                    <td className="log-details">{l.details}</td>
+                    <td className="log-details" title={l.details}>{l.details}</td>
                     <td>{new Date(l.created_at).toLocaleString()}</td>
                   </tr>
                 ))}

@@ -12,8 +12,10 @@ import { supabase, type ParkingSession, type Payment, type VehicleType } from '@
  * supabase client at @/lib/supabase.  Render <MobileApp /> anywhere.
  * ============================================================ */
 
+/** Screen view state keys in mobile flow */
 type Screen = 'home' | 'login' | 'register' | 'dashboard' | 'sessions' | 'payments' | 'vehicles' | 'wallet' | 'searchResult';
 
+/** Custom app user structure */
 interface AppUser {
   id: string;
   full_name: string;
@@ -24,6 +26,7 @@ interface AppUser {
   created_at: string;
 }
 
+/** Registered plate structure linked to app users */
 interface Vehicle {
   id: string;
   app_user_id: string | null;
@@ -33,6 +36,7 @@ interface Vehicle {
   image_url: string | null;
 }
 
+/** Settings structure parsed from Supabase settings table */
 interface Settings {
   hourly_rate_car: number;
   hourly_rate_motorcycle: number;
@@ -42,20 +46,39 @@ interface Settings {
   payment_methods: string[];
 }
 
+/**
+ * formatTime — Helper to convert ISO date strings into clean visual date/time strings.
+ *
+ * @param {string} iso — ISO 8601 Timestamp
+ * @returns {string} Human-friendly formatted time
+ */
 const formatTime = (iso: string) => new Date(iso).toLocaleString('en-US', { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
+
+/**
+ * formatDuration — Helper to format active duration intervals (milliseconds) into hours/minutes text.
+ *
+ * @param {number} ms — Interval in milliseconds
+ * @returns {string} Formatted duration string
+ */
 const formatDuration = (ms: number) => {
   const h = Math.floor(ms / 3600000);
   const m = Math.floor((ms % 3600000) / 60000);
   return h > 0 ? `${h}h ${m}m` : `${m}m`;
 };
 
-/* ---------- Reusable mobile icons (inline SVG) ---------- */
+/**
+ * MIcon — Generic inline SVG wrapper that splits path descriptions by pipes (|).
+ *
+ * @param props — Icon specification parameters (path list string d, dimension, fill state)
+ * @returns SVG element
+ */
 const MIcon = ({ d, size = 22, fill = false }: { d: string; size?: number; fill?: boolean }) => (
   <svg width={size} height={size} viewBox="0 0 24 24" fill={fill ? 'currentColor' : 'none'} stroke="currentColor" strokeWidth={1.8} strokeLinecap="round" strokeLinejoin="round">
     {d.split('|').map((p, i) => <path key={i} d={p} />)}
   </svg>
 );
 
+/** Icon components for the mobile user view flows */
 const ICar = (s: number) => <MIcon d="M5 13L7 8h10l2 5|3 13h18v6h-3v-2H6v2H3z|7 16h2M15 16h2" size={s} />;
 const IBike = (s: number) => <MIcon d="M5 18a3 3 0 1 0 0-0.1|19 18a3 3 0 1 0 0-0.1|5 18l4-6h6l2 3|15 9h3l1 3" size={s} />;
 const ISearch = (s: number) => <MIcon d="M11 19a8 8 0 1 0 0-16 8 8 0 0 0 0 16|21 21l-4.35-4.35" size={s} />;
@@ -69,16 +92,19 @@ const IPlus = (s: number) => <MIcon d="M12 5v14M5 12h14" size={s} />;
 const ILogout = (s: number) => <MIcon d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4|16 17l5-5-5-5M21 12H9" size={s} />;
 const IBell = (s: number) => <MIcon d="M18 8a6 6 0 0 0-12 0c0 7-3 9-3 9h18s-3-2-3-9|13.7 21a2 2 0 0 1-3.4 0" size={s} />;
 const IParking = (s: number) => <MIcon d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10|9 8h4a2 2 0 0 1 0 4H9z" size={s} fill />;
-const ICarFill = (s: number) => <MIcon d="M5 13L7 8h10l2 5M3 13h18v6h-3v-2H6v2H3z" size={s} fill />;
 
-/* ---------- Logo / Brand ---------- */
+/** Brand Logo rendering */
 const Logo = ({ size = 40 }: { size?: number }) => (
   <img src="/plp.png" alt="SmartPark" style={{ width: size, height: size, borderRadius: 8, objectFit: 'contain' }} />
 );
 
-/* ============================================================
- * Main Component
- * ============================================================ */
+/**
+ * MobileApp — Complete Mobile / Driver Web App interface.
+ *
+ * Toggles search screens, authentication panels, wallet setups, and history logs.
+ *
+ * @returns Mobile view component.
+ */
 export function MobileApp() {
   const [screen, setScreen] = useState<Screen>('home');
   const [user, setUser] = useState<AppUser | null>(null);
@@ -91,11 +117,18 @@ export function MobileApp() {
   const [toast, setToast] = useState<{ msg: string; type: 'success' | 'error' | 'info' } | null>(null);
   const [loading, setLoading] = useState(false);
 
+  /**
+   * showToast — Triggers transient onscreen feedback banners on the phone layout.
+   *
+   * @param msg — Banner feedback message text
+   * @param type — Banner color/status category (success/error/info)
+   */
   const showToast = useCallback((msg: string, type: 'success' | 'error' | 'info' = 'info') => {
     setToast({ msg, type });
     setTimeout(() => setToast(null), 3000);
   }, []);
 
+  /** Load system settings on mount */
   useEffect(() => {
     supabase.from('settings').select('key, value').then(({ data }) => {
       if (data) {
@@ -105,6 +138,11 @@ export function MobileApp() {
     });
   }, []);
 
+  /**
+   * loadUserData — Queries registered vehicles and active parking sessions for an authenticated user.
+   *
+   * @param userId — Account owner AppUser ID
+   */
   const loadUserData = useCallback(async (userId: string) => {
     const [{ data: v }, { data: s }] = await Promise.all([
       supabase.from('vehicles').select('*').eq('app_user_id', userId),
@@ -114,7 +152,12 @@ export function MobileApp() {
     setActiveSession(s as ParkingSession | null);
   }, []);
 
-  /* ---- Search plate (Concept A) ---- */
+  /**
+   * searchPlateNumber — Performs plate queries for public search (Concept A).
+   *
+   * Validates: plate formatting.
+   * Fetches: active parking session matching query plus last 5 payment records.
+   */
   const searchPlateNumber = async () => {
     if (!searchPlate.trim()) { showToast('Enter your plate number', 'error'); return; }
     setLoading(true);
@@ -137,10 +180,13 @@ export function MobileApp() {
     setLoading(false);
   };
 
-  /* ---- Auth (Concept B) ---- */
+  /** Form states for Login and Signup */
   const [loginForm, setLoginForm] = useState({ email: '', phone: '' });
   const [registerForm, setRegisterForm] = useState({ full_name: '', email: '', phone: '' });
 
+  /**
+   * handleLogin — Logs in an AppUser using email.
+   */
   const handleLogin = async () => {
     if (!loginForm.email.trim()) { showToast('Enter your email', 'error'); return; }
     setLoading(true);
@@ -153,6 +199,9 @@ export function MobileApp() {
     showToast(`Welcome back, ${data.full_name.split(' ')[0]}!`, 'success');
   };
 
+  /**
+   * handleRegister — Registers a new driver profile in app_users database.
+   */
   const handleRegister = async () => {
     if (!registerForm.full_name.trim() || !registerForm.email.trim()) { showToast('Name and email are required', 'error'); return; }
     setLoading(true);
@@ -171,6 +220,9 @@ export function MobileApp() {
     showToast('Account created! Welcome to SmartPark.', 'success');
   };
 
+  /**
+   * logout — Clears current session states and resets view back to home screen.
+   */
   const logout = () => {
     setUser(null);
     setVehicles([]);
@@ -179,8 +231,12 @@ export function MobileApp() {
     showToast('Logged out', 'info');
   };
 
-  /* ---- Add vehicle ---- */
+  /** Form states for vehicle entry additions */
   const [vehicleForm, setVehicleForm] = useState({ plate: '', type: 'car' as VehicleType, color: '' });
+
+  /**
+   * addVehicle — Link a new license plate number to the registered driver's profile.
+   */
   const addVehicle = async () => {
     if (!vehicleForm.plate.trim() || !user) { showToast('Plate number required', 'error'); return; }
     const { data, error } = await supabase.from('vehicles').insert({
@@ -195,13 +251,31 @@ export function MobileApp() {
     showToast('Vehicle registered', 'success');
   };
 
-  /* ---- Pay session ---- */
+  /**
+   * paySession — Submits payment calculations for active sessions and logs departure.
+   *
+   * @param session — Target active parking session record
+   * @param method — Chosen payment gateway (cash, card, gcash, or wallet balance)
+   */
   const paySession = async (session: ParkingSession, method: string) => {
     if (!session) return;
     const rate = session.vehicle_type === 'car' ? settings.hourly_rate_car : settings.hourly_rate_motorcycle;
     const durationMs = Date.now() - new Date(session.entry_time).getTime();
     const hours = Math.max(0.5, durationMs / 3600000);
     const total = Math.round(hours * rate * 100) / 100;
+    
+    // Deduct from wallet first if using Concept B registered balance
+    if (user && method === 'wallet') {
+      if (user.wallet_balance < total) {
+        showToast('Insufficient wallet balance. Please top up.', 'error');
+        return;
+      }
+      const newBal = Math.max(0, user.wallet_balance - total);
+      const { error: balErr } = await supabase.from('app_users').update({ wallet_balance: newBal }).eq('id', user.id);
+      if (balErr) { showToast('Wallet deduction failed', 'error'); return; }
+      setUser({ ...user, wallet_balance: newBal });
+    }
+
     const receipt = `RCP-${Date.now().toString().slice(-6)}`;
     const { error: payErr } = await supabase.from('payments').insert({
       receipt_number: receipt,
@@ -214,21 +288,22 @@ export function MobileApp() {
       status: 'completed',
       processed_by: 'mobile-app',
     });
+
     if (payErr) { showToast('Payment failed', 'error'); return; }
     await supabase.from('parking_sessions').update({ status: 'completed', exit_time: new Date().toISOString() }).eq('id', session.id);
-    if (user && method === 'wallet') {
-      const newBal = Math.max(0, user.wallet_balance - total);
-      await supabase.from('app_users').update({ wallet_balance: newBal }).eq('id', user.id);
-      setUser({ ...user, wallet_balance: newBal });
-    }
+
     setActiveSession(null);
     setSearchedSession(null);
     showToast(`Payment of ${settings.currency}${total.toFixed(2)} successful!`, 'success');
     setScreen(user ? 'dashboard' : 'home');
   };
 
-  /* ---- Top up wallet ---- */
+  /** Form states for top-ups */
   const [topUpAmount, setTopUpAmount] = useState('');
+
+  /**
+   * topUpWallet — Updates registered account wallet_balance columns.
+   */
   const topUpWallet = async () => {
     const amt = parseFloat(topUpAmount);
     if (!amt || amt <= 0 || !user) { showToast('Enter a valid amount', 'error'); return; }
@@ -242,9 +317,6 @@ export function MobileApp() {
 
   const currency = settings.currency || '₱';
 
-  /* ============================================================
-   * Render
-   * ============================================================ */
   return (
     <div className="mobile-shell">
       <div className="mobile-phone">
@@ -258,7 +330,7 @@ export function MobileApp() {
           </div>
         </div>
 
-        {/* Content */}
+        {/* Content viewport */}
         <div className="m-content">
           {toast && <div className={`m-toast m-toast-${toast.type}`}>{toast.msg}</div>}
 
@@ -477,7 +549,7 @@ export function MobileApp() {
                 <button className="m-dash-logout" onClick={logout}>{ILogout(18)}</button>
               </div>
 
-              {/* Wallet card */}
+              {/* Wallet balance */}
               <div className="m-wallet-card" onClick={() => setScreen('wallet')}>
                 <div className="m-wallet-top">
                   <span className="m-wallet-label">{IWallet(18)} Wallet Balance</span>
@@ -486,7 +558,7 @@ export function MobileApp() {
                 <div className="m-wallet-action">Tap to top up {IArrow(14)}</div>
               </div>
 
-              {/* Active session */}
+              {/* Active driver session */}
               {activeSession ? (
                 <div className="m-active-session-card">
                   <div className="m-session-header">
@@ -527,7 +599,7 @@ export function MobileApp() {
                 </div>
               )}
 
-              {/* Quick actions */}
+              {/* Quick actions panel */}
               <div className="m-quick-actions">
                 <button className="m-quick-action" onClick={() => setScreen('vehicles')}>
                   <span className="m-qa-icon m-qa-blue">{ICar(22)}</span>
@@ -548,7 +620,7 @@ export function MobileApp() {
                 </button>
               </div>
 
-              {/* Vehicles preview */}
+              {/* Vehicles summary list */}
               <div className="m-preview-section">
                 <div className="m-preview-header">
                   <h2 className="m-section-title">Registered Vehicles</h2>
@@ -619,7 +691,7 @@ export function MobileApp() {
                     {ICheck(16)}
                   </div>
                 ))}
-                {vehicles.length === 0 && <div className="m-empty-mini"><p>No vehicles yet</p></div>}
+                {vehicles.length === 0 && <div className="m-empty-mini"><p>No vehicles registered yet.</p></div>}
               </div>
             </div>
           )}
@@ -662,7 +734,7 @@ export function MobileApp() {
           )}
         </div>
 
-        {/* Bottom nav for logged-in users */}
+        {/* Bottom navigation panel */}
         {user && ['dashboard', 'vehicles', 'sessions', 'payments', 'wallet'].includes(screen) && (
           <div className="m-bottomnav">
             <button className={screen === 'dashboard' ? 'active' : ''} onClick={() => setScreen('dashboard')}>
@@ -688,6 +760,12 @@ export function MobileApp() {
  * Sub-screens (kept in same file for portability)
  * ============================================================ */
 
+/**
+ * SessionsScreen — Renders the historical active and completed parking logs associated with a driver account.
+ *
+ * @param props — Target AppUser metadata and return navigation callback
+ * @returns Driver sessions list UI
+ */
 function SessionsScreen({ userId, onBack, currency }: { userId: string; onBack: () => void; currency: string }) {
   const [sessions, setSessions] = useState<ParkingSession[]>([]);
   const [loading, setLoading] = useState(true);
@@ -736,12 +814,17 @@ function SessionsScreen({ userId, onBack, currency }: { userId: string; onBack: 
   );
 }
 
+/**
+ * PaymentsScreen — Renders all digital financial transactions processed for a driver account.
+ *
+ * @param props — Target AppUser metadata and return navigation callback
+ * @returns Driver payments history UI
+ */
 function PaymentsScreen({ userId, onBack, currency }: { userId: string; onBack: () => void; currency: string }) {
   const [payments, setPayments] = useState<Payment[]>([]);
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
-    // Fetch via plate numbers from the user's sessions
     supabase.from('parking_sessions').select('plate_number').eq('app_user_id', userId).then(({ data: sessions }) => {
       const plates = (sessions || []).map((s: any) => s.plate_number);
       if (plates.length === 0) { setPayments([]); setLoading(false); return; }

@@ -325,75 +325,55 @@ Vehicle at Exit Camera
 ### Navigation Structure
 
 ```
-┌─────────────────────────────────────────────────┐
-│  SIDEBAR                     │  MAIN CONTENT    │
-│                              │                  │
-│  🏠 Dashboard                │  ┌────────────┐  │
-│  💳 Payments                 │  │  Topbar     │  │
-│  👥 User Management          │  │  (Search +  │  │
-│  📊 Statistics               │  │  Notifs +   │  │
-│  🅿️ Slot Management          │  │  Profile)   │  │
-│                              │  └────────────┘  │
-│                              │                  │
-│                              │  Page Content    │
-│  ⚙️ Settings (bottom)        │                  │
-└─────────────────────────────────────────────────┘
+┌──────────────────────────────────────────────────┐
+│  SIDEBAR (Collapsible)        │  MAIN CONTENT    │
+│                               │                  │
+│  🏠 Dashboard                 │  ┌────────────┐  │
+│  🅿️ Slot Management           │  │  Topbar     │  │
+│  📊 Statistics                │  │  (Search +  │  │
+│  📝 Logs                      │  │  Notifs +   │  │
+│                               │  │  Profile    │  │
+│                               │  │  Dropdown)  │  │
+│  ⚙️ Settings (bottom overlay)  │  └────────────┘  │
+└───────────────────────────────┴──────────────────┘
 ```
+
+* **Sidebar Collapse**: Can be toggled to a compact icon-only view using the Chevron button at the bottom of the sidebar.
+* **Profile Dropdown**: Click the Admin profile avatar in the Topbar to access "Sign Out".
+* **Floating Settings Modal**: Open Settings triggers a floating modal overlay instead of navigating to a full new page.
 
 ### Dashboard (`Dashboard.tsx`)
 
-| Section | Description |
-|---------|-------------|
-| **Capacity Cards** | Cars and Motorcycles available counts vs. max capacity |
-| **Mini Stats** | Active sessions count, total slots |
-| **Camera Feed** | Live view placeholder with camera selection (Entrance/Exit/Slot tabs) |
-| **Plate Recognition Panel** | Scrollable list of recent OCR detections |
-| **Manual Vehicle Entry** | Form for manually logging plate recognitions (plate, type, direction, time, slot) |
-
-### Payments (`Payments.tsx`)
-
-| Section | Description |
-|---------|-------------|
-| **Process Payment** | Form: plate number, duration, hourly rate, auto-calculated total, payment method selector |
-| **Payment History** | Paginated table with receipt number, plate, duration, amount, method, date, status, and action buttons (View, Refund, Print) |
-
-### User Management (`UserManagement.tsx`)
-
-| Section | Description |
-|---------|-------------|
-| **Search Bar** | Filter by name, username, or email |
-| **User Table** | Columns: Name, Username, Role, Status, Email, Last Login, Actions (View, Edit, Delete, Reset Password) |
-
-### Statistics (`Statistics.tsx`)
-
-| Chart | Description |
-|-------|-------------|
-| **Daily Vehicle Entries** | Bar chart (Mon–Sun) |
-| **Hourly Parking Occupancy** | Bar chart by hour |
-| **Vehicle Type Distribution** | Donut chart (Cars vs. Motorcycles) |
-| **Revenue by Day** | Bar chart (Mon–Sun) |
-| **Peak Parking Hours** | Highlight card showing busiest hour(s) |
+* **Compact Metric Cards**: Size-optimized summary cards for available Car and Motorcycle capacities.
+* **Quick Actions Card**: Positioned in the upper-right of the dashboard grid, providing instant access to:
+  * **Manual Entry**: Triggers a floating entry form modal. Enforces UPPERCASE formatting and strict 3-8 character bounds on plate number inputs. Supported with manually editable timestamps.
+  * **Manual Payment**: Triggers a floating payment processing form modal. Automatically calculates totals and registers cash, card, or GCash payments.
+* **Global Draft Persistence**: Input forms for Manual Entry and Payments automatically cache progress in `localStorage` system-wide, preserving drafts if the user accidentally closes modals or switches pages.
+* **Camera Feed & Recognition**: Live preview pane alongside real-time license plate detection events.
 
 ### Slot Management (`SlotManagement.tsx`)
 
-| Feature | Description |
-|---------|-------------|
-| **Filters** | By Floor, Vehicle Type, Status |
-| **Slot Grid** | Card-based layout showing slot ID, type icon, status, with Edit/Disable/Reserve actions |
-| **Legend** | Color-coded status indicators |
+* **Floor & Status Filters**: Filter spots dynamically by floor, vehicle compatibility, or status (Available, Occupied, Reserved, Disabled).
+* **Slot Cards**: Quick toggle options to edit slot ROIs, disable/enable, or reserve individual parking bays.
+
+### Statistics (`Statistics.tsx`)
+
+* Daily vehicle traffic, hourly parking occupancy levels, distribution of vehicle types, peak load hours, and weekly revenues visualized in custom styled chart containers.
+
+### Logs (`Logs.tsx`)
+
+A consolidated management center containing three tabbed lists:
+1. **User Management**: Add, delete, or view registered admin console staff accounts.
+2. **Payment Logs**: A purely read-only audit log of payment transactions (receipt numbers, plate details, durations, payment methods, totals, and statuses).
+3. **Vehicle Logs**: Active and historical session list showing entrance snapshots, slot assignments, and exit details.
 
 ### Settings (`Settings.tsx`)
 
-| Tab | Description |
-|-----|-------------|
-| **Camera Configuration** | Table of all cameras with name, type, location, slot range, online status |
-| **Plate Recognition** | Confidence threshold, Camera FPS |
-| **Parking Rates** | Hourly rates per vehicle type, max capacities |
-| **Receipt Template** | Header text, address, footer customization |
-| **Payment Methods** | Toggle switches for Cash, GCash, Card |
-| **Backup & Restore** | Download backup, restore, export buttons |
-| **Notifications** | Toggle switches for each event type |
-| **Activity Logs** | Searchable audit trail table |
+* **Cameras & Vision Tab**: Merges camera configurations table with plate recognition parameters (sensitivity, confidence threshold, and camera FPS).
+* **Parking Handling Tab**: Consolidates parking rates, payment gateways, and print receipt templates into side-by-side structures.
+  * Hardcoded Default Currency (₱).
+  * Removed User Permission / RBAC configurations.
+
 
 ---
 

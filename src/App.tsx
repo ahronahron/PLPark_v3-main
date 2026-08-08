@@ -14,13 +14,12 @@
  * 3. **Notification System** — Fetches and manages system
  *    notifications passed to the Topbar component.
  */
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import { Sidebar, Topbar, PageContainer } from '@/components/Layout';
 import { Dashboard } from '@/pages/Dashboard';
-import { Payments } from '@/pages/Payments';
-import { UserManagement } from '@/pages/UserManagement';
 import { Statistics } from '@/pages/Statistics';
 import { SlotManagement } from '@/pages/SlotManagement';
+import { Logs } from '@/pages/Logs';
 import { Settings } from '@/pages/Settings';
 import { MobileApp } from '@/pages/MobileApp';
 import { useNotifications } from '@/lib/hooks';
@@ -32,11 +31,9 @@ import { useNotifications } from '@/lib/hooks';
  */
 const pageTitles: Record<string, string> = {
   dashboard: 'Dashboard',
-  payments: 'Payment & Receipt',
-  users: 'User Management',
-  statistics: 'Parking Statistics',
   slots: 'Slot Management',
-  settings: 'System Settings',
+  statistics: 'Parking Statistics',
+  logs: 'Logs & Management',
 };
 
 /**
@@ -45,10 +42,8 @@ const pageTitles: Record<string, string> = {
  * State:
  * - `page`: Currently active admin page ID (defaults to 'dashboard').
  * - `view`: Whether showing 'admin' dashboard or 'mobile' public app.
- *
- * The admin view renders a sidebar + topbar shell with conditional
- * page content. The mobile view renders the full MobileApp component
- * inside a minimal wrapper.
+ * - `sidebarCollapsed`: Whether the left sidebar navigation is collapsed.
+ * - `isSettingsOpen`: Whether the floating settings modal overlay is open.
  *
  * @returns The complete application UI.
  */
@@ -59,8 +54,36 @@ function App() {
   /** Tracks whether the admin dashboard or mobile app is displayed */
   const [view, setView] = useState<'admin' | 'mobile'>('admin');
 
+  /** Tracks if the sidebar navigation is collapsed */
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
+
+  /** Tracks if the settings floating modal overlay is open */
+  const [isSettingsOpen, setIsSettingsOpen] = useState(false);
+
   /** Custom hook that fetches notifications from Supabase and provides a markAllRead function */
   const { notifications, markAllRead } = useNotifications();
+
+  /**
+   * Check User-Agent on mount to auto-route mobile browsers to the Mobile App view.
+   */
+  useEffect(() => {
+    const userAgent = navigator.userAgent || navigator.vendor || (window as any).opera;
+    const isMobile = /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(userAgent);
+    if (isMobile) {
+      setView('mobile');
+    }
+  }, []);
+
+  /**
+   * handleSignOut — Simulates logging out of the admin panel.
+   *
+   * Asks for confirmation, then refreshes the application.
+   */
+  const handleSignOut = () => {
+    if (confirm('Are you sure you want to sign out?')) {
+      window.location.reload();
+    }
+  };
 
   /*
    * MOBILE VIEW
@@ -86,8 +109,9 @@ function App() {
    * Renders the full admin dashboard with:
    * - Toggle bar at the top for switching between Admin and Mobile views
    * - Sidebar navigation on the left
-   * - Topbar with search, notifications, and user profile
+   * - Topbar with search, notifications, and user profile dropdown
    * - Main content area that conditionally renders the active page
+   * - Floating Settings Modal overlay
    */
   return (
     <>
@@ -100,23 +124,45 @@ function App() {
       {/* Main application shell: sidebar + content area */}
       <div className="app-shell">
         {/* Left sidebar navigation — highlights current page, calls setPage on click */}
-        <Sidebar currentPage={page} onNavigate={setPage} />
+        <Sidebar
+          currentPage={page}
+          onNavigate={setPage}
+          collapsed={sidebarCollapsed}
+          onToggleCollapse={() => setSidebarCollapsed(!sidebarCollapsed)}
+          onOpenSettings={() => setIsSettingsOpen(true)}
+        />
 
         <div className="main-area">
-          {/* Top header bar with page title, search, notifications, and user info */}
-          <Topbar title={pageTitles[page] || ''} notifications={notifications} onMarkAllRead={markAllRead} />
+          {/* Top header bar with page title, search, notifications, user profile and sign out handler */}
+          <Topbar
+            title={pageTitles[page] || ''}
+            notifications={notifications}
+            onMarkAllRead={markAllRead}
+            onSignOut={handleSignOut}
+          />
 
           {/* Page content area — renders the component matching the active page ID */}
           <PageContainer>
             {page === 'dashboard' && <Dashboard />}
-            {page === 'payments' && <Payments />}
-            {page === 'users' && <UserManagement />}
-            {page === 'statistics' && <Statistics />}
             {page === 'slots' && <SlotManagement />}
-            {page === 'settings' && <Settings />}
+            {page === 'statistics' && <Statistics />}
+            {page === 'logs' && <Logs />}
           </PageContainer>
         </div>
       </div>
+
+      {/* Floating settings modal overlay */}
+      {isSettingsOpen && (
+        <div className="settings-overlay" onClick={() => setIsSettingsOpen(false)}>
+          <div className="settings-container" onClick={e => e.stopPropagation()}>
+            <div className="settings-header">
+              <h2>System Settings</h2>
+              <button className="close-btn" onClick={() => setIsSettingsOpen(false)} title="Close Settings">×</button>
+            </div>
+            <Settings />
+          </div>
+        </div>
+      )}
     </>
   );
 }

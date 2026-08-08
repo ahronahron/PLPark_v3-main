@@ -4,23 +4,29 @@
  * This module exports three layout components that form the
  * structural skeleton of the admin dashboard:
  *
- * 1. **Sidebar** — Left navigation panel with branding, nav items, and system status
- * 2. **Topbar** — Top header with page title, search, notifications, and user profile
+ * 1. **Sidebar** — Left navigation panel with branding, nav items, settings, and collapse toggle
+ * 2. **Topbar** — Top header with page title, search, notifications, and user profile dropdown
  * 3. **PageContainer** — Content wrapper that applies consistent padding and scrolling
  *
  * These components are composed in App.tsx to create the admin layout.
  */
-import { type ReactNode } from 'react';
-import { IconDashboard, IconPayment, IconUsers, IconChart, IconGrid, IconSettings, IconBell, IconSearch } from '@/components/Icons';
+import { useState, type ReactNode } from 'react';
+import { IconDashboard, IconChart, IconGrid, IconSettings, IconBell, IconSearch, IconLogs, IconArrowLeft, IconArrowRight } from '@/components/Icons';
 
 /**
  * SidebarProps — Props interface for the Sidebar component.
  * @property currentPage — The currently active page ID for highlighting
  * @property onNavigate — Callback fired when a nav item is clicked
+ * @property collapsed — Whether the sidebar is currently collapsed
+ * @property onToggleCollapse — Callback to toggle collapsed state
+ * @property onOpenSettings — Callback to open the settings modal
  */
 interface SidebarProps {
   currentPage: string;
   onNavigate: (page: string) => void;
+  collapsed: boolean;
+  onToggleCollapse: () => void;
+  onOpenSettings: () => void;
 }
 
 /**
@@ -29,34 +35,29 @@ interface SidebarProps {
  * - `id`: Internal page identifier (matches pageTitles keys in App.tsx)
  * - `label`: Display text shown in the sidebar
  * - `Icon`: SVG icon component rendered next to the label
- *
- * The order here determines the visual order in the sidebar.
  */
 const navItems = [
   { id: 'dashboard', label: 'Dashboard', Icon: IconDashboard },
-  { id: 'payments', label: 'Payments', Icon: IconPayment },
-  { id: 'users', label: 'User Management', Icon: IconUsers },
-  { id: 'statistics', label: 'Statistics', Icon: IconChart },
   { id: 'slots', label: 'Slot Management', Icon: IconGrid },
-  { id: 'settings', label: 'Settings', Icon: IconSettings },
+  { id: 'statistics', label: 'Statistics', Icon: IconChart },
+  { id: 'logs', label: 'Logs', Icon: IconLogs },
 ];
 
 /**
  * Sidebar — Left-side navigation panel for the admin dashboard.
  *
- * Renders the application branding (logo + title), a vertical list
- * of navigation buttons, and a system status indicator at the bottom.
- *
- * The active page is highlighted with the 'active' CSS class.
- * Clicking a nav item calls `onNavigate` with the item's ID,
- * which updates the page state in App.tsx.
+ * Renders the application branding, a vertical list of navigation buttons,
+ * and bottom controls for settings and sidebar collapse.
  *
  * @param currentPage — ID of the currently active page
  * @param onNavigate — Callback to switch to a different page
+ * @param collapsed — Boolean showing if the sidebar is collapsed
+ * @param onToggleCollapse — Callback to collapse/expand
+ * @param onOpenSettings — Callback to open settings floating modal
  */
-export function Sidebar({ currentPage, onNavigate }: SidebarProps) {
+export function Sidebar({ currentPage, onNavigate, collapsed, onToggleCollapse, onOpenSettings }: SidebarProps) {
   return (
-    <aside className="sidebar">
+    <aside className={`sidebar ${collapsed ? 'collapsed' : ''}`}>
       {/* Branding section — logo image and app name */}
       <div className="sidebar-brand">
         <img src="/plp.png" alt="Logo" className="sidebar-logo" />
@@ -74,6 +75,7 @@ export function Sidebar({ currentPage, onNavigate }: SidebarProps) {
             /* Apply 'active' class when this item matches the current page */
             className={`nav-item ${currentPage === item.id ? 'active' : ''}`}
             onClick={() => onNavigate(item.id)}
+            title={collapsed ? item.label : undefined}
           >
             {/* Icon component with consistent 18px size */}
             <item.Icon size={18} className="nav-icon" />
@@ -82,14 +84,25 @@ export function Sidebar({ currentPage, onNavigate }: SidebarProps) {
         ))}
       </nav>
 
-      {/* Footer section — system online status indicator */}
-      <div className="sidebar-footer">
-        <div className="sidebar-footer-label">System Status</div>
-        <div className="sidebar-status-row">
-          {/* Green dot indicating the system is operational */}
-          <span className="status-dot status-online" />
-          <span>Online</span>
-        </div>
+      {/* Footer section with Settings and Collapse buttons */}
+      <div className="sidebar-bottom">
+        <button
+          className="sidebar-footer-btn"
+          onClick={onOpenSettings}
+          title="Settings"
+        >
+          <IconSettings size={18} className="nav-icon" />
+          <span className="sidebar-footer-btn-label">Settings</span>
+        </button>
+
+        <button
+          className="sidebar-footer-btn"
+          onClick={onToggleCollapse}
+          title={collapsed ? "Expand Sidebar" : "Collapse Sidebar"}
+        >
+          {collapsed ? <IconArrowRight size={18} className="nav-icon" /> : <IconArrowLeft size={18} className="nav-icon" />}
+          <span className="sidebar-footer-btn-label">Collapse</span>
+        </button>
       </div>
     </aside>
   );
@@ -100,30 +113,28 @@ export function Sidebar({ currentPage, onNavigate }: SidebarProps) {
  * @property title — Page title displayed on the left side
  * @property notifications — Array of notification objects for the bell dropdown
  * @property onMarkAllRead — Callback to mark all notifications as read
+ * @property onSignOut — Callback fired when the user signs out
  */
 interface TopbarProps {
   title: string;
   notifications: { id: string; type: string; title: string; message: string | null; created_at: string; is_read: boolean }[];
   onMarkAllRead: () => void;
+  onSignOut: () => void;
 }
 
 /**
  * Topbar — Top header bar for the admin dashboard.
  *
- * Contains four sections from left to right:
- * 1. **Page Title** — Dynamic based on the current route
- * 2. **Search Bar** — Global search input with Ctrl+K shortcut hint
- * 3. **Notification Bell** — Shows unread count badge and dropdown with recent notifications
- * 4. **User Profile** — Displays admin avatar, name, and role
- *
- * The notification dropdown appears on hover/focus and shows the most
- * recent 8 notifications with read/unread styling.
+ * Contains page title, search, notification bell, and user profile dropdown.
  *
  * @param title — The title of the currently active page
  * @param notifications — Array of notification objects from useNotifications hook
  * @param onMarkAllRead — Function to mark all notifications as read
+ * @param onSignOut — Function to handle user sign out
  */
-export function Topbar({ title, notifications, onMarkAllRead }: TopbarProps) {
+export function Topbar({ title, notifications, onMarkAllRead, onSignOut }: TopbarProps) {
+  const [isProfileOpen, setIsProfileOpen] = useState(false);
+
   return (
     <header className="topbar">
       {/* Dynamic page title */}
@@ -172,13 +183,22 @@ export function Topbar({ title, notifications, onMarkAllRead }: TopbarProps) {
           </div>
         </div>
 
-        {/* User profile section — avatar initial, name, and role */}
-        <div className="topbar-user">
-          <div className="user-avatar">A</div>
-          <div className="user-info">
-            <div className="user-name">Admin</div>
-            <div className="user-role">Administrator</div>
+        {/* User profile trigger and dropdown */}
+        <div className="profile-container">
+          <div className="profile-trigger" onClick={() => setIsProfileOpen(!isProfileOpen)}>
+            <div className="user-avatar">A</div>
+            <div className="user-info">
+              <div className="user-name">Admin</div>
+              <div className="user-role">Administrator</div>
+            </div>
           </div>
+          {isProfileOpen && (
+            <div className="profile-dropdown">
+              <button className="dropdown-item" onClick={() => { setIsProfileOpen(false); onSignOut(); }}>
+                Sign Out
+              </button>
+            </div>
+          )}
         </div>
       </div>
     </header>
