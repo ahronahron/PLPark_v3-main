@@ -114,6 +114,9 @@ export function Dashboard() {
   const availableCars = maxCars - occupiedCarSlots;
   const availableMotos = maxMotos - occupiedMotoSlots;
   const filteredCameras = cameras.filter(c => c.type === cameraTab);
+  const availableSlotOptions = slots
+    .filter(s => s.status === 'available' && s.vehicle_type === manualForm.type)
+    .map(s => s.slot_id);
   const payTotal = parseFloat(paymentForm.duration || '0') * parseFloat(paymentForm.rate || '0');
 
   // ============================================================
@@ -353,44 +356,51 @@ export function Dashboard() {
               <button className="close-btn" onClick={() => setIsEntryModalOpen(false)}>×</button>
             </div>
             <div className="modal-body">
-              <div className="form-group">
-                <label>Plate Number</label>
-                <input
-                  value={manualForm.plate}
-                  onChange={e => setManualForm({ ...manualForm, plate: e.target.value.toUpperCase().replace(/[^A-Z0-9 -]/g, '').slice(0, 8) })}
-                  placeholder="ABC 1234"
-                  maxLength={8}
-                />
-                <span className="form-hint">Enforces uppercase alphanumeric (3-8 chars).</span>
-              </div>
-              <div className="form-group">
-                <label>Vehicle Type</label>
-                <select value={manualForm.type} onChange={e => setManualForm({ ...manualForm, type: e.target.value as VehicleType })}>
-                  <option value="car">Car</option>
-                  <option value="motorcycle">Motorcycle</option>
-                </select>
-              </div>
-              <div className="form-group">
-                <label>Entry / Exit</label>
-                <select value={manualForm.direction} onChange={e => setManualForm({ ...manualForm, direction: e.target.value as Direction })}>
-                  <option value="entry">Entry</option>
-                  <option value="exit">Exit</option>
-                </select>
-              </div>
-              <div className="form-group">
-                <label>Time</label>
-                <input type="datetime-local" value={manualForm.time} onChange={e => setManualForm({ ...manualForm, time: e.target.value })} />
-                <span className="form-hint">Defaults to current local time; fully editable.</span>
-              </div>
-              <div className="form-group">
-                <label>Assigned Slot (optional)</label>
-                <input value={manualForm.slot} onChange={e => setManualForm({ ...manualForm, slot: e.target.value })} placeholder="A1" />
+                <div className="manual-entry-grid">
+                <div className="form-group full-width">
+                  <label>Plate Number</label>
+                  <input
+                    value={manualForm.plate}
+                    onChange={e => setManualForm({ ...manualForm, plate: e.target.value.toUpperCase().replace(/[^A-Z0-9 -]/g, '').slice(0, 8) })}
+                    placeholder="ABC 1234"
+                    maxLength={8}
+                  />
+                  <span className="form-hint">Enforces uppercase alphanumeric (3-8 chars).</span>
+                </div>
+                <div className="form-group">
+                  <label>Vehicle Type</label>
+                  <select value={manualForm.type} onChange={e => setManualForm({ ...manualForm, type: e.target.value as VehicleType, slot: '' })}>
+                    <option value="car">Car</option>
+                    <option value="motorcycle">Motorcycle</option>
+                  </select>
+                </div>
+                <div className="form-group">
+                  <label>Entry / Exit</label>
+                  <select value={manualForm.direction} onChange={e => setManualForm({ ...manualForm, direction: e.target.value as Direction })}>
+                    <option value="entry">Entry</option>
+                    <option value="exit">Exit</option>
+                  </select>
+                </div>
+                <div className="form-group">
+                  <label>Assigned Slot</label>
+                  <select value={manualForm.slot} onChange={e => setManualForm({ ...manualForm, slot: e.target.value })}>
+                    <option value="">Select a slot</option>
+                    {availableSlotOptions.map(slotId => (
+                      <option key={slotId} value={slotId}>{slotId}</option>
+                    ))}
+                  </select>
+                </div>
+                <div className="form-group full-width">
+                  <label>Time</label>
+                  <input type="datetime-local" value={manualForm.time} onChange={e => setManualForm({ ...manualForm, time: e.target.value })} />
+                  <span className="form-hint">Defaults to current local time; editable.</span>
+                </div>
               </div>
               <div className="form-actions" style={{ marginTop: '20px', justifyContent: 'flex-end' }}>
                 <button className="btn-secondary" onClick={() => {
                   setManualForm({ plate: '', type: 'car', direction: 'entry', time: getCurrentDateTimeLocal(), slot: '' });
                   localStorage.removeItem('plp_draft_manual_entry');
-                }}>Clear Draft</button>
+                }}>Cancel</button>
                 <button className="btn-primary" onClick={handleManualSave}>Save Entry</button>
               </div>
               {saveStatus && <div className={`save-status ${saveStatus.includes('Error') || saveStatus.includes('must be') ? 'error' : 'success'}`} style={{ marginTop: '12px' }}>{saveStatus}</div>}
@@ -408,7 +418,7 @@ export function Dashboard() {
               <button className="close-btn" onClick={() => setIsPaymentModalOpen(false)}>×</button>
             </div>
             <div className="modal-body">
-              <div className="payment-form-compact">
+              <div className="payment-form-grid">
                 <div className="form-group">
                   <label>Plate Number</label>
                   <input
@@ -443,7 +453,7 @@ export function Dashboard() {
                 <button className="btn-secondary" onClick={() => {
                   setPaymentForm({ plate: '', duration: '', rate: '50', method: 'cash' });
                   localStorage.removeItem('plp_draft_manual_payment');
-                }}>Clear Draft</button>
+                }}>Cancel</button>
                 <button className="btn-primary" onClick={handleProcessPayment}>Process Payment</button>
               </div>
               {payStatus && <div className={`save-status ${payStatus.includes('Error') || payStatus.includes('must be') ? 'error' : 'success'}`} style={{ marginTop: '12px' }}>{payStatus}</div>}

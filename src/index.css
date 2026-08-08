@@ -373,8 +373,8 @@ a { color: inherit; text-decoration: none; }
   .nav-item { justify-content: center; padding: 10px 4px; }
   .settings-nav-item { justify-content: center; padding: 10px 4px; }
   .camera-row { grid-template-columns: 1fr; }
-  .manual-form { grid-template-columns: repeat(2, 1fr); }
-  .payment-form-grid { grid-template-columns: repeat(2, 1fr); }
+  .manual-form, .manual-entry-grid { grid-template-columns: 1fr; }
+  .payment-form-grid { grid-template-columns: 1fr; }
   .settings-page { flex-direction: column; height: auto; }
   .settings-sidebar { width: 100%; display: flex; flex-wrap: wrap; gap: 4px; border-radius: 8px; }
   .settings-nav-item { width: auto; margin-bottom: 0; }
@@ -384,7 +384,7 @@ a { color: inherit; text-decoration: none; }
   .page-toolbar { flex-direction: column; align-items: stretch; }
 }
 @media (max-width: 600px) {
-  .manual-form, .payment-form-grid { grid-template-columns: 1fr; }
+  .manual-form, .manual-entry-grid, .payment-form-grid { grid-template-columns: 1fr; }
   .slots-grid { grid-template-columns: repeat(auto-fill, minmax(120px, 1fr)); }
   .data-table { font-size: 11px; }
   .data-table th, .data-table td { padding: 8px; }

@@ -10,7 +10,7 @@
  *
  * These components are composed in App.tsx to create the admin layout.
  */
-import { useState, type ReactNode } from 'react';
+import { useState, useEffect, type ReactNode } from 'react';
 import { IconDashboard, IconChart, IconGrid, IconSettings, IconBell, IconSearch, IconLogs, IconArrowLeft, IconArrowRight } from '@/components/Icons';
 
 /**
@@ -134,6 +134,10 @@ interface TopbarProps {
  */
 export function Topbar({ title, notifications, onMarkAllRead, onSignOut }: TopbarProps) {
   const [isProfileOpen, setIsProfileOpen] = useState(false);
+
+  useEffect(() => {
+    setIsProfileOpen(false);
+  }, [title]);
 
   return (
     <header className="topbar">

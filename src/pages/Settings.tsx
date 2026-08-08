@@ -48,6 +48,8 @@ export function Settings() {
   const [activeSection, setActiveSection] = useState('camera_vision');
   const [settings, setSettings] = useState<Record<string, any>>({});
   const [cameras, setCameras] = useState<any[]>([]);
+  const [newCamera, setNewCamera] = useState({ name: '', location: '', type: 'entrance', slot_range: '' });
+  const [cameraEdits, setCameraEdits] = useState<Record<string, any>>({});
   const [logs, setLogs] = useState<any[]>([]);
   const [logSearch, setLogSearch] = useState('');
   const [saveMsg, setSaveMsg] = useState('');
@@ -73,6 +75,56 @@ export function Settings() {
     setSettings(prev => ({ ...prev, [key]: value }));
     setSaveMsg(`Setting saved successfully.`);
     setTimeout(() => setSaveMsg(''), 2000);
+  };
+
+  const updateCameraEdit = (id: string | number, field: string, value: any) => {
+    setCameraEdits(prev => ({
+      ...prev,
+      [String(id)]: { ...prev[String(id)], [field]: value },
+    }));
+  };
+
+  const handleCameraUpdate = async (camera: any) => {
+    const changes = cameraEdits[String(camera.id)] || {};
+    if (!changes.type && !changes.location && !changes.slot_range) {
+      setSaveMsg('No changes to save.');
+      return;
+    }
+
+    const { error } = await supabase.from('cameras').update(changes).eq('id', camera.id);
+    if (error) {
+      setSaveMsg('Error updating camera: ' + error.message);
+      return;
+    }
+
+    setCameras(prev => prev.map((c: any) => c.id === camera.id ? { ...c, ...changes } : c));
+    setCameraEdits(prev => ({ ...prev, [String(camera.id)]: {} }));
+    setSaveMsg('Camera updated successfully.');
+    setTimeout(() => setSaveMsg(''), 2000);
+  };
+
+  const handleAddCamera = async () => {
+    if (!newCamera.name || !newCamera.location) {
+      setSaveMsg('Camera name and location are required.');
+      return;
+    }
+
+    const { data, error } = await supabase.from('cameras').insert({
+      ...newCamera,
+      is_online: true,
+    }).select();
+
+    if (error) {
+      setSaveMsg('Error adding camera: ' + error.message);
+      return;
+    }
+
+    if (data && data.length > 0) {
+      setCameras(prev => [...prev, data[0]]);
+      setNewCamera({ name: '', location: '', type: 'entrance', slot_range: '' });
+      setSaveMsg('Camera added successfully.');
+      setTimeout(() => setSaveMsg(''), 2000);
+    }
   };
 
   /** Filter logs by user name, action description, or active module */
@@ -117,23 +169,67 @@ export function Settings() {
             <p className="settings-desc">Manage system video sources and plate recognition parameters.</p>
             
             <div style={{ display: 'flex', flexDirection: 'column', gap: '24px' }}>
-              <div>
-                <h3 style={{ fontSize: '13px', fontWeight: 600, marginBottom: '12px' }}>Camera Setup</h3>
-                <table className="data-table">
-                  <thead><tr><th>Camera Name</th><th>Type</th><th>Location</th><th>Slot Range</th><th>Status</th></tr></thead>
-                  <tbody>
-                    {cameras.map(c => (
-                      <tr key={c.id}>
-                        <td>{c.name}</td>
-                        <td><span className={`cam-type-badge ${c.type}`}>{c.type}</span></td>
-                        <td>{c.location}</td>
-                        <td>{c.slot_range || '—'}</td>
-                        <td><span className={`status-badge ${c.is_online ? 'completed' : 'failed'}`}>{c.is_online ? 'online' : 'offline'}</span></td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </div>
+<div className="camera-management">
+                  <div>
+                    <h3 style={{ fontSize: '13px', fontWeight: 600, marginBottom: '12px' }}>Camera Setup</h3>
+                    <table className="data-table">
+                      <thead><tr><th>Name</th><th>Type</th><th>Location</th><th>Slot Range</th><th>Status</th><th>Action</th></tr></thead>
+                      <tbody>
+                        {cameras.map(c => {
+                          const edit = cameraEdits[String(c.id)] || {};
+                          return (
+                            <tr key={c.id}>
+                              <td>{c.name}</td>
+                              <td>
+                                <select value={edit.type ?? c.type} onChange={e => updateCameraEdit(c.id, 'type', e.target.value)}>
+                                  <option value="entrance">Entrance</option>
+                                  <option value="exit">Exit</option>
+                                  <option value="slot">Slot</option>
+                                </select>
+                              </td>
+                              <td>
+                                <input type="text" value={edit.location ?? c.location || ''} onChange={e => updateCameraEdit(c.id, 'location', e.target.value)} />
+                              </td>
+                              <td>
+                                <input type="text" value={edit.slot_range ?? c.slot_range || ''} onChange={e => updateCameraEdit(c.id, 'slot_range', e.target.value)} placeholder="A1-A4" />
+                              </td>
+                              <td><span className={`status-badge ${c.is_online ? 'completed' : 'failed'}`}>{c.is_online ? 'online' : 'offline'}</span></td>
+                              <td><button className="btn-secondary" style={{ padding: '6px 12px' }} onClick={() => handleCameraUpdate(c)}>Save</button></td>
+                            </tr>
+                          );
+                        })}
+                        {cameras.length === 0 && <tr><td colSpan={6} className="empty-state">No cameras configured</td></tr>}
+                      </tbody>
+                    </table>
+                  </div>
+
+                  <div className="camera-add-card">
+                    <h3 style={{ fontSize: '13px', fontWeight: 600, marginBottom: '12px' }}>Add Camera</h3>
+                    <div className="settings-form full-width">
+                      <div className="form-group">
+                        <label>Camera Name</label>
+                        <input value={newCamera.name} onChange={e => setNewCamera(prev => ({ ...prev, name: e.target.value }))} placeholder="Entrance Camera 01" />
+                      </div>
+                      <div className="form-group">
+                        <label>Type</label>
+                        <select value={newCamera.type} onChange={e => setNewCamera(prev => ({ ...prev, type: e.target.value }))}>
+                          <option value="entrance">Entrance</option>
+                          <option value="exit">Exit</option>
+                          <option value="slot">Slot</option>
+                        </select>
+                      </div>
+                      <div className="form-group">
+                        <label>Location</label>
+                        <input value={newCamera.location} onChange={e => setNewCamera(prev => ({ ...prev, location: e.target.value }))} placeholder="Main Gate" />
+                      </div>
+                      <div className="form-group">
+                        <label>Slot Range</label>
+                        <input value={newCamera.slot_range} onChange={e => setNewCamera(prev => ({ ...prev, slot_range: e.target.value }))} placeholder="A1-A4" />
+                      </div>
+                      <button className="btn-primary" style={{ width: 'fit-content' }} onClick={handleAddCamera}>Add Camera</button>
+                    </div>
+                  </div>
+                </div>
 
               <div>
                 <h3 style={{ fontSize: '13px', fontWeight: 600, marginBottom: '12px' }}>Plate Recognition Parameters</h3>
