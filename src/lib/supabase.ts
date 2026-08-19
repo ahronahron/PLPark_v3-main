@@ -137,6 +137,9 @@ export interface ParkingSlot {
   status: SlotStatus;
   current_session_id: string | null;
   created_at: string;
+  aoi_polygon: number[][] | null;
+  camera_id: string | null;
+  aoi_color: string | null;
 }
 
 /**
