@@ -48,7 +48,8 @@ export function Settings() {
   const [activeSection, setActiveSection] = useState('camera_vision');
   const [settings, setSettings] = useState<Record<string, any>>({});
   const [cameras, setCameras] = useState<any[]>([]);
-  const [newCamera, setNewCamera] = useState({ name: '', location: '', type: 'entrance', slot_range: '' });
+  const [devices, setDevices] = useState<MediaDeviceInfo[]>([]);
+  const [newCamera, setNewCamera] = useState({ name: '', location: '', type: 'entrance', slot_range: '', device_id: '' });
   const [cameraEdits, setCameraEdits] = useState<Record<string, any>>({});
   const [logs, setLogs] = useState<any[]>([]);
   const [logSearch, setLogSearch] = useState('');
@@ -59,7 +60,17 @@ export function Settings() {
     supabase.from('settings').select('key, value').then(({ data }) => {
       if (data) setSettings(Object.fromEntries(data.map((r: any) => [r.key, r.value])));
     });
-    supabase.from('cameras').select('*').order('name').then(({ data }) => setCameras(data || []));
+    supabase.from('cameras').select('id, name, type, location, is_online, slot_range, device_id, created_at').order('name').then(({ data, error }) => {
+      if (!error) {
+        setCameras(data || []);
+        return;
+      }
+      supabase.from('cameras').select('id, name, type, location, is_online, slot_range, created_at').order('name').then(({ data: fallbackData, error: fallbackError }) => {
+        if (fallbackError) setSaveMsg('Unable to load cameras: ' + fallbackError.message);
+        else setCameras(fallbackData || []);
+      });
+    });
+    navigator.mediaDevices?.enumerateDevices().then(items => setDevices(items.filter(item => item.kind === 'videoinput')));
     supabase.from('activity_logs').select('*').order('created_at', { ascending: false }).limit(50).then(({ data }) => setLogs(data || []));
   }, []);
 
@@ -86,15 +97,25 @@ export function Settings() {
 
   const handleCameraUpdate = async (camera: any) => {
     const changes = cameraEdits[String(camera.id)] || {};
-    if (!changes.type && !changes.location && !changes.slot_range) {
+    if (!changes.type && !changes.location && !changes.slot_range && !changes.device_id) {
       setSaveMsg('No changes to save.');
       return;
     }
 
-    const { error } = await supabase.from('cameras').update(changes).eq('id', camera.id);
+    const { device_id, ...baseChanges } = changes;
+    const { error } = Object.keys(baseChanges).length > 0
+      ? await supabase.from('cameras').update(baseChanges).eq('id', camera.id)
+      : { error: null };
     if (error) {
       setSaveMsg('Error updating camera: ' + error.message);
       return;
+    }
+
+    if (device_id !== undefined) {
+      const { error: deviceError } = await supabase.from('cameras').update({ device_id }).eq('id', camera.id);
+      if (deviceError) {
+        setSaveMsg('Camera saved. Run the device assignment migration in Supabase to save the selected device.');
+      }
     }
 
     setCameras(prev => prev.map((c: any) => c.id === camera.id ? { ...c, ...changes } : c));
@@ -109,10 +130,8 @@ export function Settings() {
       return;
     }
 
-    const { data, error } = await supabase.from('cameras').insert({
-      ...newCamera,
-      is_online: true,
-    }).select();
+    const { device_id, ...cameraFields } = newCamera;
+    const { data, error } = await supabase.from('cameras').insert({ ...cameraFields, is_online: true }).select();
 
     if (error) {
       setSaveMsg('Error adding camera: ' + error.message);
@@ -120,11 +139,32 @@ export function Settings() {
     }
 
     if (data && data.length > 0) {
-      setCameras(prev => [...prev, data[0]]);
-      setNewCamera({ name: '', location: '', type: 'entrance', slot_range: '' });
+      let addedCamera = data[0];
+      if (device_id) {
+        const { data: assignedCamera, error: deviceError } = await supabase.from('cameras').update({ device_id }).eq('id', addedCamera.id).select().single();
+        if (assignedCamera && !deviceError) {
+          addedCamera = assignedCamera;
+        } else if (deviceError) {
+          setSaveMsg('Camera added. Run the device assignment migration in Supabase to save the selected device.');
+        }
+      }
+      setCameras(prev => [...prev, addedCamera]);
+      setNewCamera({ name: '', location: '', type: 'entrance', slot_range: '', device_id: '' });
       setSaveMsg('Camera added successfully.');
       setTimeout(() => setSaveMsg(''), 2000);
     }
+  };
+
+  const handleDeleteCamera = async (camera: any) => {
+    if (!confirm(`Remove ${camera.name}?`)) return;
+    const { error } = await supabase.from('cameras').delete().eq('id', camera.id);
+    if (error) {
+      setSaveMsg('Error removing camera: ' + error.message);
+      return;
+    }
+    setCameras(prev => prev.filter(item => item.id !== camera.id));
+    setSaveMsg('Camera removed.');
+    setTimeout(() => setSaveMsg(''), 2000);
   };
 
   /** Filter logs by user name, action description, or active module */
@@ -193,6 +233,13 @@ export function Settings() {
                       <label>Slot Range</label>
                       <input value={newCamera.slot_range} onChange={e => setNewCamera(prev => ({ ...prev, slot_range: e.target.value }))} placeholder="A1-A4" />
                     </div>
+                    <div className="form-group">
+                      <label>Device</label>
+                      <select value={newCamera.device_id} onChange={e => setNewCamera(prev => ({ ...prev, device_id: e.target.value }))}>
+                        <option value="">Default device</option>
+                        {devices.map(device => <option key={device.deviceId} value={device.deviceId}>{device.label || 'Camera device'}</option>)}
+                      </select>
+                    </div>
                     <button className="btn-primary" style={{ width: 'fit-content' }} onClick={handleAddCamera}>Add Camera</button>
                   </div>
                 </div>
@@ -219,7 +266,7 @@ export function Settings() {
                 <div>
                   <h3 style={{ fontSize: '13px', fontWeight: 600, marginBottom: '12px' }}>Camera Setup</h3>
                   <table className="data-table">
-                    <thead><tr><th>Name</th><th>Type</th><th>Location</th><th>Slot Range</th><th>Status</th><th>Action</th></tr></thead>
+                    <thead><tr><th>Name</th><th>Type</th><th>Location</th><th>Slot Range</th><th>Device</th><th>Status</th><th>Action</th></tr></thead>
                     <tbody>
                       {cameras.map(c => {
                         const edit = cameraEdits[String(c.id)] || {};
@@ -239,12 +286,18 @@ export function Settings() {
                             <td>
                               <input type="text" value={(edit.slot_range ?? c.slot_range) || ''} onChange={e => updateCameraEdit(c.id, 'slot_range', e.target.value)} placeholder="A1-A4" />
                             </td>
+                            <td>
+                              <select value={edit.device_id ?? c.device_id ?? ''} onChange={e => updateCameraEdit(c.id, 'device_id', e.target.value)}>
+                                <option value="">Default device</option>
+                                {devices.map(device => <option key={device.deviceId} value={device.deviceId}>{device.label || 'Camera device'}</option>)}
+                              </select>
+                            </td>
                             <td><span className={`status-badge ${c.is_online ? 'completed' : 'failed'}`}>{c.is_online ? 'online' : 'offline'}</span></td>
-                            <td><button className="btn-secondary" style={{ padding: '6px 12px' }} onClick={() => handleCameraUpdate(c)}>Save</button></td>
+                            <td><div className="row-actions"><button className="btn-secondary" style={{ padding: '6px 12px' }} onClick={() => handleCameraUpdate(c)}>Save</button><button className="action-btn" title="Remove camera" onClick={() => handleDeleteCamera(c)}>×</button></div></td>
                           </tr>
                         );
                       })}
-                      {cameras.length === 0 && <tr><td colSpan={6} className="empty-state">No cameras configured</td></tr>}
+                      {cameras.length === 0 && <tr><td colSpan={7} className="empty-state">No cameras configured</td></tr>}
                     </tbody>
                   </table>
                 </div>

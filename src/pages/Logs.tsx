@@ -12,6 +12,7 @@
 import { useEffect, useState } from 'react';
 import { supabase, type User, type Payment, type ParkingSession } from '@/lib/supabase';
 import { IconSearch, IconTrash, IconKey, IconPlus, IconDownload, IconView, IconCar, IconMotorcycle } from '@/components/Icons';
+import { SessionModal, type SessionAction } from '@/components/SessionModal';
 
 /**
  * Logs — Main Logs component.
@@ -44,6 +45,7 @@ export function Logs() {
 
   /** Filter by status (active/completed for sessions; completed/refunded/pending for payments) */
   const [statusFilter, setStatusFilter] = useState('all');
+  const [sessionModal, setSessionModal] = useState<{ session: ParkingSession; action: SessionAction } | null>(null);
 
   /**
    * loadData — Loads data from Supabase depending on the active tab.
@@ -89,6 +91,18 @@ export function Logs() {
     if (!confirm('Are you sure you want to delete this user?')) return;
     await supabase.from('users').delete().eq('id', id);
     setUsers(prev => prev.filter(u => u.id !== id));
+  };
+
+  const deletePayment = async (id: string) => {
+    if (!confirm('Are you sure you want to delete this payment record?')) return;
+    await supabase.from('payments').delete().eq('id', id);
+    setPayments(prev => prev.filter(payment => payment.id !== id));
+  };
+
+  const deleteSession = async (id: string) => {
+    if (!confirm('Are you sure you want to delete this vehicle session?')) return;
+    await supabase.from('parking_sessions').delete().eq('id', id);
+    setSessions(prev => prev.filter(session => session.id !== id));
   };
 
   // ============================================================
@@ -143,7 +157,7 @@ export function Logs() {
           </button>
         </div>
       </div>
-      <table className="data-table">
+      <table className="data-table logs-table logs-users-table">
         <thead>
           <tr>
             <th>Name</th>
@@ -207,7 +221,7 @@ export function Logs() {
           </select>
         </div>
       </div>
-      <table className="data-table">
+      <table className="data-table logs-table logs-payments-table">
         <thead>
           <tr>
             <th>Receipt No.</th>
@@ -217,6 +231,7 @@ export function Logs() {
             <th>Method</th>
             <th>Date</th>
             <th>Status</th>
+            <th>Actions</th>
           </tr>
         </thead>
         <tbody>
@@ -229,9 +244,10 @@ export function Logs() {
               <td><span className={`method-badge ${p.payment_method}`}>{p.payment_method}</span></td>
               <td>{new Date(p.created_at).toLocaleString()}</td>
               <td><span className={`status-badge ${p.status}`}>{p.status}</span></td>
+              <td><div className="row-actions"><button className="action-btn action-danger" title="Delete payment" onClick={() => deletePayment(p.id)}><IconTrash size={15} /></button></div></td>
             </tr>
           ))}
-          {filteredPayments.length === 0 && <tr><td colSpan={7} className="empty-state">No payments found</td></tr>}
+          {filteredPayments.length === 0 && <tr><td colSpan={8} className="empty-state">No payments found</td></tr>}
         </tbody>
       </table>
     </div>
@@ -265,7 +281,7 @@ export function Logs() {
           </select>
         </div>
       </div>
-      <table className="data-table">
+      <table className="data-table logs-table logs-vehicles-table">
         <thead>
           <tr>
             <th>Plate Number</th>
@@ -275,6 +291,7 @@ export function Logs() {
             <th>Exit Time</th>
             <th>Entrance Snapshot</th>
             <th>Status</th>
+            <th>Actions</th>
           </tr>
         </thead>
         <tbody>
@@ -307,9 +324,10 @@ export function Logs() {
                 )}
               </td>
               <td><span className={`status-badge ${s.status}`}>{s.status}</span></td>
+              <td><div className="row-actions"><button className="action-btn action-text" title="Manual Exit" onClick={() => setSessionModal({ session: s, action: 'exit' })}>Exit</button><button className="action-btn action-text" title="Manual Payment" onClick={() => setSessionModal({ session: s, action: 'payment' })}>Pay</button><button className="action-btn action-danger" title="Delete session" onClick={() => deleteSession(s.id)}><IconTrash size={15} /></button></div></td>
             </tr>
           ))}
-          {filteredSessions.length === 0 && <tr><td colSpan={7} className="empty-state">No vehicle sessions found</td></tr>}
+          {filteredSessions.length === 0 && <tr><td colSpan={8} className="empty-state">No vehicle sessions found</td></tr>}
         </tbody>
       </table>
     </div>
@@ -338,6 +356,7 @@ export function Logs() {
           {activeTab === 'vehicles' && renderVehicles()}
         </div>
       </div>
+      {sessionModal && <SessionModal session={sessionModal.session} sessions={sessions} action={sessionModal.action} onClose={() => setSessionModal(null)} onComplete={loadData} />}
     </div>
   );
 }

@@ -55,6 +55,7 @@ function App() {
 
   /** Tracks if the settings floating modal overlay is open */
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
+  const [searchQuery, setSearchQuery] = useState('');
 
   /** Custom hook that fetches notifications from Supabase and provides a markAllRead function */
   const { notifications, markAllRead } = useNotifications();
@@ -133,11 +134,12 @@ function App() {
             notifications={notifications}
             onMarkAllRead={markAllRead}
             onSignOut={handleSignOut}
+            onSearch={setSearchQuery}
           />
 
           {/* Page content area — renders the component matching the active page ID */}
           <PageContainer>
-            {page === 'dashboard' && <Dashboard />}
+            {page === 'dashboard' && <Dashboard searchQuery={searchQuery} />}
             {page === 'slots' && <SlotManagement />}
             {page === 'statistics' && <Statistics />}
             {page === 'logs' && <Logs />}

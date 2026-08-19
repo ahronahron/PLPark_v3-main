@@ -180,6 +180,7 @@ export interface Camera {
   location: string | null;
   is_online: boolean;
   slot_range: string | null;
+  device_id: string | null;
   created_at: string;
 }
 

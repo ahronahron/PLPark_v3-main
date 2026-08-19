@@ -32,12 +32,14 @@ interface CameraFeedProps {
   onEntranceResult?: (result: EntranceResult) => void;
   /** Callback when an exit session is completed */
   onExitResult?: (result: ExitResult) => void;
+  /** Optional device assigned to this configured camera in Settings. */
+  deviceId?: string | null;
 }
 
 /**
  * CameraFeed — Renders live camera with YOLO overlay and detection controls.
  */
-export function CameraFeed({ mode, onEntranceResult, onExitResult }: CameraFeedProps) {
+export function CameraFeed({ mode, onEntranceResult, onExitResult, deviceId }: CameraFeedProps) {
   // ============================================================
   // REFS
   // ============================================================
@@ -72,10 +74,10 @@ export function CameraFeed({ mode, onEntranceResult, onExitResult }: CameraFeedP
     cam.enumerateDevices().then(devs => {
       setDevices(devs);
       if (devs.length > 0) {
-        setSelectedDevice(devs[0].deviceId);
+        setSelectedDevice(deviceId && devs.some(device => device.deviceId === deviceId) ? deviceId : devs[0].deviceId);
       }
     });
-  }, []);
+  }, [deviceId]);
 
   /**
    * drawOverlay — Draws YOLO bounding boxes on the canvas overlay.

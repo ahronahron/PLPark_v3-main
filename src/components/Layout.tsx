@@ -104,6 +104,7 @@ interface TopbarProps {
   notifications: { id: string; type: string; title: string; message: string | null; created_at: string; is_read: boolean }[];
   onMarkAllRead: () => void;
   onSignOut: () => void;
+  onSearch?: (query: string) => void;
 }
 
 /**
@@ -116,7 +117,7 @@ interface TopbarProps {
  * @param onMarkAllRead — Function to mark all notifications as read
  * @param onSignOut — Function to handle user sign out
  */
-export function Topbar({ title, notifications, onMarkAllRead, onSignOut }: TopbarProps) {
+export function Topbar({ title, notifications, onMarkAllRead, onSignOut, onSearch }: TopbarProps) {
   const [isProfileOpen, setIsProfileOpen] = useState(false);
 
   useEffect(() => {
@@ -132,7 +133,7 @@ export function Topbar({ title, notifications, onMarkAllRead, onSignOut }: Topba
         {/* Global search input with icon and keyboard shortcut hint */}
         <div className="topbar-search">
           <IconSearch size={15} className="search-icon" />
-          <input placeholder="Search..." />
+          <input placeholder="Search plates, sessions..." onChange={event => onSearch?.(event.target.value)} />
           <span className="search-kbd">Ctrl K</span>
         </div>
 

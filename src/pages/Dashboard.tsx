@@ -17,6 +17,7 @@ import { useEffect, useState, useCallback } from 'react';
 import { supabase, type ParkingSlot, type Camera, type PlateRecognition, type ParkingSession, type VehicleType, type Direction } from '@/lib/supabase';
 import { IconCar, IconMotorcycle, IconCamera, IconPlus, IconPayment, IconClock } from '@/components/Icons';
 import { CameraFeed } from '@/components/CameraFeed';
+import { SessionModal, type SessionAction } from '@/components/SessionModal';
 import type { EntranceResult, ExitResult } from '@/lib/visionEngine';
 
 /**
@@ -39,7 +40,7 @@ const getCurrentDateTimeLocal = (): string => {
  *
  * @returns The dashboard page UI.
  */
-export function Dashboard() {
+export function Dashboard({ searchQuery = '' }: { searchQuery?: string }) {
   // ============================================================
   // STATE MANAGEMENT
   // ============================================================
@@ -55,6 +56,7 @@ export function Dashboard() {
   /** Modal triggers */
   const [isEntryModalOpen, setIsEntryModalOpen] = useState(false);
   const [isPaymentModalOpen, setIsPaymentModalOpen] = useState(false);
+  const [sessionModal, setSessionModal] = useState<{ session: ParkingSession | null; action: SessionAction } | null>(null);
 
   /** Status messages */
   const [saveStatus, setSaveStatus] = useState('');
@@ -124,6 +126,10 @@ export function Dashboard() {
     .map(s => s.slot_id);
   const payTotal = parseFloat(paymentForm.duration || '0') * parseFloat(paymentForm.rate || '0');
   const RECOGNITIONS_COLLAPSE_THRESHOLD = 6; // show See more when list exceeds this
+  const activeSessions = sessions.filter(session => session.status === 'active');
+  const visibleRecognitions = recognitions.filter(recognition => !searchQuery || [recognition.plate_number, recognition.camera_name, recognition.direction, recognition.vehicle_type].some(value => value?.toLowerCase().includes(searchQuery.toLowerCase())));
+  const matchingExitSessions = activeSessions.filter(session => session.plate_number.toLowerCase().includes(manualForm.plate.toLowerCase()));
+  const matchingPaymentSessions = activeSessions.filter(session => session.plate_number.toLowerCase().includes(paymentForm.plate.toLowerCase()));
 
   // ============================================================
   // VISION PIPELINE CALLBACKS
@@ -171,6 +177,21 @@ export function Dashboard() {
     }
     if (formattedPlate.length < 3 || formattedPlate.length > 8) {
       setSaveStatus('Plate number must be between 3 and 8 characters.');
+      return;
+    }
+
+    if (manualForm.direction === 'exit') {
+      const session = activeSessions.find(item => item.plate_number.toUpperCase() === formattedPlate);
+      if (!session) {
+        setSaveStatus('Plate number does not match an active session.');
+        return;
+      }
+      const { error } = await supabase.from('parking_sessions').update({ status: 'completed', exit_time: new Date().toISOString() }).eq('id', session.id);
+      if (error) { setSaveStatus('Error saving: ' + error.message); return; }
+      if (session.slot_id) await supabase.from('parking_slots').update({ status: 'available', current_session_id: null }).eq('slot_id', session.slot_id);
+      setSaveStatus('Manual exit completed.');
+      refreshAfterDetection();
+      setTimeout(() => { setSaveStatus(''); setIsEntryModalOpen(false); }, 1000);
       return;
     }
 
@@ -228,6 +249,12 @@ export function Dashboard() {
       return;
     }
 
+    const activeSession = activeSessions.find(session => session.plate_number.toUpperCase() === formattedPlate);
+    if (!activeSession) {
+      setPayStatus('Plate number does not match an active session.');
+      return;
+    }
+
     // Fetch existing payment count to build unique receipt sequence
     const { data: countData } = await supabase.from('payments').select('id');
     const receiptNum = `RCP-2024-${String((countData?.length || 0) + 1).padStart(4, '0')}`;
@@ -238,6 +265,7 @@ export function Dashboard() {
       duration_hours: parseFloat(paymentForm.duration),
       hourly_rate: parseFloat(paymentForm.rate),
       total_amount: payTotal,
+      session_id: activeSession.id,
       payment_method: paymentForm.method,
       status: 'completed',
       processed_by: 'admin',
@@ -323,6 +351,7 @@ export function Dashboard() {
               {(cameraTab === 'entrance' || cameraTab === 'exit') ? (
                 <CameraFeed
                   mode={cameraTab as 'entrance' | 'exit'}
+                  deviceId={activeCamera?.device_id}
                   onEntranceResult={handleEntranceResult}
                   onExitResult={handleExitResult}
                 />
@@ -374,8 +403,11 @@ export function Dashboard() {
                 flex: '1 1 auto',
               }}
             >
-              {(recognitionsExpanded ? recognitions : recognitions.slice(0, RECOGNITIONS_COLLAPSE_THRESHOLD)).map(r => (
-                <div key={r.id} className="recognition-item">
+              {(recognitionsExpanded ? visibleRecognitions : visibleRecognitions.slice(0, RECOGNITIONS_COLLAPSE_THRESHOLD)).map(r => (
+                <button key={r.id} className="recognition-item recognition-item-button" onClick={() => {
+                  const session = sessions.find(item => item.plate_number.toUpperCase() === r.plate_number.toUpperCase() && item.status === 'active');
+                  setSessionModal({ session: session || null, action: r.direction === 'exit' ? 'exit' : 'payment' });
+                }}>
                   <div className="rec-plate">{r.plate_number}</div>
                   <div className="rec-details">
                     <div className="rec-row"><span className="rec-label">Type</span><span className="rec-value">{r.vehicle_type}</span></div>
@@ -385,7 +417,7 @@ export function Dashboard() {
                     <div className="rec-row"><span className="rec-label">Confidence</span><span className="rec-value">{r.confidence}%</span></div>
                     <div className="rec-row"><span className="rec-label">Camera</span><span className="rec-value">{r.camera_name}</span></div>
                   </div>
-                </div>
+                </button>
               ))}
               {recognitions.length === 0 && <div className="empty-state">No detections</div>}
             </div>
@@ -420,11 +452,12 @@ export function Dashboard() {
                     placeholder="ABC 1234"
                     maxLength={8}
                   />
+                  {manualForm.direction === 'exit' && manualForm.plate && <div className="plate-suggestions">{matchingExitSessions.map(session => <button key={session.id} onClick={() => setManualForm({ ...manualForm, plate: session.plate_number, type: session.vehicle_type, slot: session.slot_id || '' })}>{session.plate_number}<span>{session.vehicle_type} {session.slot_id ? `• Slot ${session.slot_id}` : ''}</span></button>)}{matchingExitSessions.length === 0 && <div className="plate-no-match">Plate number does not match an active session.</div>}</div>}
                   <span className="form-hint">Enforces uppercase alphanumeric (3-8 chars).</span>
                 </div>
                 <div className="form-group">
                   <label>Vehicle Type</label>
-                  <select value={manualForm.type} onChange={e => setManualForm({ ...manualForm, type: e.target.value as VehicleType, slot: '' })}>
+                  <select disabled={manualForm.direction === 'exit'} value={manualForm.type} onChange={e => setManualForm({ ...manualForm, type: e.target.value as VehicleType, slot: '' })}>
                     <option value="car">Car</option>
                     <option value="motorcycle">Motorcycle</option>
                   </select>
@@ -438,7 +471,7 @@ export function Dashboard() {
                 </div>
                 <div className="form-group">
                   <label>Assigned Slot</label>
-                  <select value={manualForm.slot} onChange={e => setManualForm({ ...manualForm, slot: e.target.value })}>
+                  <select disabled={manualForm.direction === 'exit'} value={manualForm.slot} onChange={e => setManualForm({ ...manualForm, slot: e.target.value })}>
                     <option value="">Select a slot</option>
                     {availableSlotOptions.map(slotId => (
                       <option key={slotId} value={slotId}>{slotId}</option>
@@ -447,7 +480,7 @@ export function Dashboard() {
                 </div>
                 <div className="form-group full-width">
                   <label>Time</label>
-                  <input type="datetime-local" value={manualForm.time} onChange={e => setManualForm({ ...manualForm, time: e.target.value })} />
+                  <input disabled={manualForm.direction === 'exit'} type="datetime-local" value={manualForm.time} onChange={e => setManualForm({ ...manualForm, time: e.target.value })} />
                   <span className="form-hint">Defaults to current local time; editable.</span>
                 </div>
               </div>
@@ -482,6 +515,7 @@ export function Dashboard() {
                     placeholder="ABC 1234"
                     maxLength={8}
                   />
+                  {paymentForm.plate && matchingPaymentSessions.length > 0 && <div className="plate-suggestions">{matchingPaymentSessions.map(session => <button key={session.id} onClick={() => setPaymentForm({ ...paymentForm, plate: session.plate_number, duration: Math.max(0.5, (Date.now() - new Date(session.entry_time).getTime()) / 3600000).toFixed(2), rate: session.vehicle_type === 'motorcycle' ? '25' : '50' })}>{session.plate_number}<span>{session.vehicle_type} {session.slot_id ? `• Slot ${session.slot_id}` : ''}</span></button>)}</div>}
                 </div>
                 <div className="form-group">
                   <label>Parking Duration (hrs)</label>
@@ -516,6 +550,8 @@ export function Dashboard() {
           </div>
         </div>
       )}
+
+      {sessionModal && <SessionModal session={sessionModal.session} sessions={sessions} action={sessionModal.action} onClose={() => setSessionModal(null)} onComplete={refreshAfterDetection} />}
 
     </div>
   );
