@@ -213,6 +213,10 @@ export function CameraFeed({ mode, onEntranceResult, onExitResult }: CameraFeedP
         const processor = new ExitProcessor();
 
         processor.onStatusChange((s) => setStatus(s));
+        // Subscribe to detections/frame so overlay works for exit as well
+        // (ExitProcessor now provides YOLO guidance)
+        (processor as any).onDetections?.((d: any) => setDetections(d));
+        (processor as any).onFrame?.(() => drawOverlay());
         processor.onResult((result) => {
           setLastExitInfo({
             plate: result.plateNumber,

@@ -1126,12 +1126,17 @@ export class EntranceProcessor {
 export class ExitProcessor {
   private cameraManager: CameraManager;
   private plateReader: PlateReader;
+  // Added YOLO detector and detections to mirror EntranceProcessor logic
+  private detector: YOLODetector | null = null;
+  private _detections: Detection[] = [];
   private intervalId: number | null = null;
   private lockedPlates: Set<string> = new Set();
   private _status: PipelineStatus = 'idle';
   private _lastResult: ExitResult | null = null;
   private statusCallbacks: ((status: PipelineStatus) => void)[] = [];
   private resultCallbacks: ((result: ExitResult) => void)[] = [];
+  private detectionCallbacks: ((detections: Detection[]) => void)[] = [];
+  private frameCallbacks: (() => void)[] = [];
   private _isProcessing = false;
 
   constructor() {
@@ -1151,6 +1156,11 @@ export class ExitProcessor {
   /** Register a result listener (session completed) */
   onResult(cb: (result: ExitResult) => void): void { this.resultCallbacks.push(cb); }
 
+  /** Register detection updates (YOLO) */
+  onDetections(cb: (detections: Detection[]) => void): void { this.detectionCallbacks.push(cb); }
+  /** Register a frame processed listener (for overlay redraw) */
+  onFrame(cb: () => void): void { this.frameCallbacks.push(cb); }
+
   private setStatus(status: PipelineStatus): void {
     this._status = status;
     this.statusCallbacks.forEach(cb => cb(status));
@@ -1163,7 +1173,12 @@ export class ExitProcessor {
   async initialize(): Promise<void> {
     this.setStatus('loading');
     try {
-      await this.plateReader.initialize();
+      // Initialize OCR and YOLO detector so exit can leverage detection-guided OCR
+      this.detector = new YOLODetector();
+      await Promise.all([
+        this.plateReader.initialize(),
+        this.detector.loadModel(),
+      ]);
       this.setStatus('idle');
     } catch (err) {
       this.setStatus('error');
@@ -1188,9 +1203,20 @@ export class ExitProcessor {
     if (this.intervalId) return;
     this.setStatus('scanning');
 
-    this.intervalId = window.setInterval(async () => {
+    // YOLO detection loop for visual/context guidance (~3 FPS)
+    const yoloLoop = () => window.setInterval(async () => {
+      await this.runYoloFrame();
+    }, 350);
+
+    // OCR scan loop (try multiple regions) — faster than previous single-crop approach
+    const ocrLoop = () => window.setInterval(async () => {
       await this.processFrame();
-    }, 500);
+    }, 1000);
+
+    // store both intervals in a composite structure: keep the main intervalId as OCR loop
+    // and store the YOLO interval id as a property on this for cleanup
+    (this as any)._yoloIntervalId = yoloLoop();
+    this.intervalId = ocrLoop();
   }
 
   /** stopProcessing — Stops the scan loop. */
@@ -1199,6 +1225,11 @@ export class ExitProcessor {
       clearInterval(this.intervalId);
       this.intervalId = null;
     }
+    if ((this as any)._yoloIntervalId) {
+      clearInterval((this as any)._yoloIntervalId);
+      (this as any)._yoloIntervalId = null;
+    }
+    this._detections = [];
     this.setStatus('idle');
   }
 
@@ -1208,6 +1239,10 @@ export class ExitProcessor {
     this.cameraManager.stopStream();
     await this.plateReader.dispose();
     this.lockedPlates.clear();
+    if (this.detector) {
+      this.detector.dispose();
+      this.detector = null;
+    }
   }
 
   /**
@@ -1224,21 +1259,44 @@ export class ExitProcessor {
 
     try {
       this._isProcessing = true;
+      // Use the same multi-region OCR strategy as EntranceProcessor for better accuracy
+      this.setStatus('reading_plate');
 
-      // Preprocess the center area of the frame for plate OCR
-      const plateRegion = this.cropCenterRegion(frame.canvas);
-      if (!plateRegion) {
-        this._isProcessing = false;
-        return;
+      const regions: HTMLCanvasElement[] = [];
+
+      // Region 1: If YOLO detected a vehicle, crop the bottom of its bbox
+      if (this._detections && this._detections.length > 0) {
+        const best = this._detections.reduce((a, b) => a.confidence > b.confidence ? a : b);
+        const bboxCrop = this.cropPlateRegion(frame.canvas, best.bbox);
+        if (bboxCrop) regions.push(bboxCrop);
       }
 
-      this.setStatus('reading_plate');
-      const plateResult = await this.plateReader.confirmPlate(plateRegion);
+      // Region 2: Center-bottom strip of the full frame
+      const centerBottom = this.cropFrameRegion(frame.canvas, 0.15, 0.55, 0.70, 0.40);
+      if (centerBottom) regions.push(centerBottom);
 
-      if (plateResult && !this.lockedPlates.has(plateResult.plate)) {
+      // Region 3: Center of the full frame
+      const center = this.cropFrameRegion(frame.canvas, 0.20, 0.30, 0.60, 0.40);
+      if (center) regions.push(center);
+
+      // Region 4: Full bottom half
+      const bottomHalf = this.cropFrameRegion(frame.canvas, 0.05, 0.50, 0.90, 0.45);
+      if (bottomHalf) regions.push(bottomHalf);
+
+      let plateResult: { plate: string; confidence: number } | null = null;
+      let successRegion: HTMLCanvasElement | null = null;
+
+      for (const region of regions) {
+        plateResult = await this.plateReader.confirmPlate(region);
+        if (plateResult && !this.lockedPlates.has(plateResult.plate)) {
+          successRegion = region;
+          break;
+        }
+        plateResult = null;
+      }
+
+      if (plateResult && successRegion) {
         this.setStatus('processing_exit');
-
-        // Find the active session for this plate
         const exitResult = await this.processExit(plateResult.plate, plateResult.confidence);
 
         if (exitResult) {
@@ -1247,17 +1305,14 @@ export class ExitProcessor {
           this.setStatus('exit_complete');
           this.resultCallbacks.forEach(cb => cb(exitResult));
 
-          // Auto-unlock after 30 seconds
           setTimeout(() => {
-            this.lockedPlates.delete(plateResult.plate);
+            this.lockedPlates.delete(plateResult!.plate);
           }, 30000);
         } else {
           this.setStatus('scanning');
         }
       } else {
-        if (this._status !== 'exit_complete') {
-          this.setStatus('scanning');
-        }
+        this.setStatus(this._status === 'exit_complete' ? 'exit_complete' : 'scanning');
       }
 
       this._isProcessing = false;
@@ -1266,6 +1321,105 @@ export class ExitProcessor {
       this._isProcessing = false;
       this.setStatus('scanning');
     }
+  }
+
+  /**
+   * runYoloFrame — optional YOLO run to provide detections for exit guidance
+   */
+  private async runYoloFrame(): Promise<void> {
+    if (!this.detector) return;
+    const frame = this.cameraManager.captureFrame();
+    if (!frame) return;
+
+    try {
+      const detections = await this.detector.detect(frame.imageData, 0.25);
+      this._detections = detections;
+      this.detectionCallbacks.forEach(cb => cb(detections));
+      this.frameCallbacks.forEach(cb => cb());
+      if (detections.length > 0 && this._status === 'scanning') {
+        this.setStatus('detected');
+      }
+    } catch (err) {
+      console.error('[ExitProcessor] YOLO error:', err);
+    }
+  }
+
+  /**
+   * cropPlateRegion — Extracts bottom portion of bbox (copied from EntranceProcessor)
+   */
+  private cropPlateRegion(
+    sourceCanvas: HTMLCanvasElement,
+    bbox: [number, number, number, number]
+  ): HTMLCanvasElement | null {
+    const [x1, y1, x2, y2] = bbox.map(Math.round);
+    const bboxW = x2 - x1;
+    const bboxH = y2 - y1;
+
+    if (bboxW < 30 || bboxH < 20) return null;
+
+    const plateY = y1 + Math.round(bboxH * 0.60);
+    const plateH = y2 - plateY;
+    const plateW = bboxW;
+
+    if (plateW < 40 || plateH < 15) return null;
+
+    const plateCanvas = document.createElement('canvas');
+    const scale = 2;
+    plateCanvas.width = plateW * scale;
+    plateCanvas.height = plateH * scale;
+    const ctx = plateCanvas.getContext('2d')!;
+
+    ctx.drawImage(sourceCanvas, x1, plateY, plateW, plateH, 0, 0, plateW * scale, plateH * scale);
+
+    const imgData = ctx.getImageData(0, 0, plateCanvas.width, plateCanvas.height);
+    const d = imgData.data;
+    for (let i = 0; i < d.length; i += 4) {
+      const gray = 0.299 * d[i] + 0.587 * d[i + 1] + 0.114 * d[i + 2];
+      const enhanced = Math.min(255, Math.max(0, (gray - 128) * 1.5 + 128));
+      d[i] = d[i + 1] = d[i + 2] = enhanced;
+    }
+    ctx.putImageData(imgData, 0, 0);
+
+    return plateCanvas;
+  }
+
+  /**
+   * cropFrameRegion — Crops a fractional region (copied from EntranceProcessor)
+   */
+  private cropFrameRegion(
+    sourceCanvas: HTMLCanvasElement,
+    xRatio: number,
+    yRatio: number,
+    wRatio: number,
+    hRatio: number
+  ): HTMLCanvasElement | null {
+    const sw = sourceCanvas.width;
+    const sh = sourceCanvas.height;
+    const x = Math.round(sw * xRatio);
+    const y = Math.round(sh * yRatio);
+    const w = Math.round(sw * wRatio);
+    const h = Math.round(sh * hRatio);
+
+    if (w < 40 || h < 15) return null;
+
+    const cropCanvas = document.createElement('canvas');
+    const scale = 2;
+    cropCanvas.width = w * scale;
+    cropCanvas.height = h * scale;
+    const ctx = cropCanvas.getContext('2d')!;
+
+    ctx.drawImage(sourceCanvas, x, y, w, h, 0, 0, w * scale, h * scale);
+
+    const imgData = ctx.getImageData(0, 0, cropCanvas.width, cropCanvas.height);
+    const d = imgData.data;
+    for (let i = 0; i < d.length; i += 4) {
+      const gray = 0.299 * d[i] + 0.587 * d[i + 1] + 0.114 * d[i + 2];
+      const enhanced = Math.min(255, Math.max(0, (gray - 128) * 1.5 + 128));
+      d[i] = d[i + 1] = d[i + 2] = enhanced;
+    }
+    ctx.putImageData(imgData, 0, 0);
+
+    return cropCanvas;
   }
 
   /**

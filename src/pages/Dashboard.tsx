@@ -78,6 +78,9 @@ export function Dashboard() {
     return saved ? JSON.parse(saved) : { plate: '', duration: '', rate: '50', method: 'cash' as any };
   });
 
+  /** Recognition list expand/scroll state */
+  const [recognitionsExpanded, setRecognitionsExpanded] = useState(false);
+
   // ============================================================
   // SIDE-EFFECTS & PERSISTENCE
   // ============================================================
@@ -120,6 +123,7 @@ export function Dashboard() {
     .filter(s => s.status === 'available' && s.vehicle_type === manualForm.type)
     .map(s => s.slot_id);
   const payTotal = parseFloat(paymentForm.duration || '0') * parseFloat(paymentForm.rate || '0');
+  const RECOGNITIONS_COLLAPSE_THRESHOLD = 6; // show See more when list exceeds this
 
   // ============================================================
   // VISION PIPELINE CALLBACKS
@@ -360,21 +364,40 @@ export function Dashboard() {
 
         <div className="recognition-panel">
           <div className="panel-header">Plate Recognition</div>
-          <div className="recognition-list">
-            {recognitions.map(r => (
-              <div key={r.id} className="recognition-item">
-                <div className="rec-plate">{r.plate_number}</div>
-                <div className="rec-details">
-                  <div className="rec-row"><span className="rec-label">Type</span><span className="rec-value">{r.vehicle_type}</span></div>
-                  <div className="rec-row"><span className="rec-label">Direction</span><span className={`rec-badge ${r.direction}`}>{r.direction}</span></div>
-                  <div className="rec-row"><span className="rec-label">Date</span><span className="rec-value">{new Date(r.created_at).toLocaleDateString()}</span></div>
-                  <div className="rec-row"><span className="rec-label">Time</span><span className="rec-value">{new Date(r.created_at).toLocaleTimeString('en-US', { hour12: false })}</span></div>
-                  <div className="rec-row"><span className="rec-label">Confidence</span><span className="rec-value">{r.confidence}%</span></div>
-                  <div className="rec-row"><span className="rec-label">Camera</span><span className="rec-value">{r.camera_name}</span></div>
+          {/* Wrapper keeps header, list and footer (button) inside a fixed-height panel */}
+          <div style={{ display: 'flex', flexDirection: 'column', maxHeight: '360px' }}>
+            <div
+              className="recognition-list"
+              style={{
+                // take available space and allow scrolling only when expanded
+                overflowY: recognitionsExpanded ? 'auto' : 'hidden',
+                flex: '1 1 auto',
+              }}
+            >
+              {(recognitionsExpanded ? recognitions : recognitions.slice(0, RECOGNITIONS_COLLAPSE_THRESHOLD)).map(r => (
+                <div key={r.id} className="recognition-item">
+                  <div className="rec-plate">{r.plate_number}</div>
+                  <div className="rec-details">
+                    <div className="rec-row"><span className="rec-label">Type</span><span className="rec-value">{r.vehicle_type}</span></div>
+                    <div className="rec-row"><span className="rec-label">Direction</span><span className={`rec-badge ${r.direction}`}>{r.direction}</span></div>
+                    <div className="rec-row"><span className="rec-label">Date</span><span className="rec-value">{new Date(r.created_at).toLocaleDateString()}</span></div>
+                    <div className="rec-row"><span className="rec-label">Time</span><span className="rec-value">{new Date(r.created_at).toLocaleTimeString('en-US', { hour12: false })}</span></div>
+                    <div className="rec-row"><span className="rec-label">Confidence</span><span className="rec-value">{r.confidence}%</span></div>
+                    <div className="rec-row"><span className="rec-label">Camera</span><span className="rec-value">{r.camera_name}</span></div>
+                  </div>
                 </div>
+              ))}
+              {recognitions.length === 0 && <div className="empty-state">No detections</div>}
+            </div>
+
+            {/* Footer always visible at bottom of panel when list is long */}
+            {recognitions.length > RECOGNITIONS_COLLAPSE_THRESHOLD && (
+              <div style={{ padding: '8px 0 0', textAlign: 'center', flex: '0 0 auto' }}>
+                <button className="see-more-btn" onClick={() => setRecognitionsExpanded(prev => !prev)} style={{ cursor: 'pointer' }}>
+                  {recognitionsExpanded ? 'See less' : `See more (${recognitions.length})`}
+                </button>
               </div>
-            ))}
-            {recognitions.length === 0 && <div className="empty-state">No detections</div>}
+            )}
           </div>
         </div>
       </div>
