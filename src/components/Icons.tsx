@@ -221,3 +221,19 @@ export const IconNotifications = ({ size = 16, className }: IconProps) => (
 export const IconLogs = ({ size = 16, className }: IconProps) => (
   <svg {...base(size)} className={className}><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" /><path d="M14 2v6h6M8 13h8M8 17h5" /></svg>
 );
+
+/** Chevron Left icon */
+export const IconChevronLeft = ({ size = 16, className }: IconProps) => (
+  <svg {...base(size)} className={className}><path d="m15 18-6-6 6-6" /></svg>
+);
+
+/** Chevron Right icon */
+export const IconChevronRight = ({ size = 16, className }: IconProps) => (
+  <svg {...base(size)} className={className}><path d="m9 18 6-6-6-6" /></svg>
+);
+
+/** Sidebar Toggle icon */
+export const IconSidebar = ({ size = 16, className }: IconProps) => (
+  <svg {...base(size)} className={className}><rect width="18" height="18" x="3" y="3" rx="2" /><path d="M9 3v18" /></svg>
+);
+

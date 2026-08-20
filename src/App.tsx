@@ -2,17 +2,7 @@
  * App.tsx — Root Application Component
  *
  * This is the top-level component that controls the entire
- * application layout and routing. It manages:
- *
- * 1. **View Switching** — Toggles between the Admin Dashboard
- *    and the Mobile (Public) App using a top toggle bar.
- *
- * 2. **Page Routing** — Uses client-side state (no URL router)
- *    to switch between admin pages: Dashboard, Payments,
- *    User Management, Statistics, Slot Management, and Settings.
- *
- * 3. **Notification System** — Fetches and manages system
- *    notifications passed to the Topbar component.
+ * application layout and routing.
  */
 import { useState, useEffect } from 'react';
 import { Sidebar, Topbar, PageContainer } from '@/components/Layout';
@@ -26,8 +16,7 @@ import { useNotifications } from '@/lib/hooks';
 
 /**
  * pageTitles — Maps internal page IDs to human-readable titles
- * displayed in the Topbar header. Keys correspond to the values
- * stored in the `page` state variable.
+ * displayed in the Topbar header.
  */
 const pageTitles: Record<string, string> = {
   dashboard: 'Dashboard',
@@ -38,13 +27,6 @@ const pageTitles: Record<string, string> = {
 
 /**
  * App — Root component for PLPark.
- *
- * State:
- * - `page`: Currently active admin page ID (defaults to 'dashboard').
- * - `view`: Whether showing 'admin' dashboard or 'mobile' public app.
- * - `isSettingsOpen`: Whether the floating settings modal overlay is open.
- *
- * @returns The complete application UI.
  */
 function App() {
   /** Tracks which admin page is currently active */
@@ -53,12 +35,25 @@ function App() {
   /** Tracks whether the admin dashboard or mobile app is displayed */
   const [view, setView] = useState<'admin' | 'mobile'>('admin');
 
+  /** Tracks if the sidebar is collapsed */
+  const [isSidebarCollapsed, setIsSidebarCollapsed] = useState(() => {
+    return localStorage.getItem('plp_sidebar_collapsed') === 'true';
+  });
+
   /** Tracks if the settings floating modal overlay is open */
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
-  const [searchQuery, setSearchQuery] = useState('');
 
   /** Custom hook that fetches notifications from Supabase and provides a markAllRead function */
   const { notifications, markAllRead } = useNotifications();
+
+  /** Toggle sidebar collapse */
+  const handleToggleSidebar = () => {
+    setIsSidebarCollapsed(prev => {
+      const next = !prev;
+      localStorage.setItem('plp_sidebar_collapsed', String(next));
+      return next;
+    });
+  };
 
   /**
    * Check User-Agent on mount to auto-route mobile browsers to the Mobile App view.
@@ -73,8 +68,6 @@ function App() {
 
   /**
    * handleSignOut — Simulates logging out of the admin panel.
-   *
-   * Asks for confirmation, then refreshes the application.
    */
   const handleSignOut = () => {
     if (confirm('Are you sure you want to sign out?')) {
@@ -84,18 +77,14 @@ function App() {
 
   /*
    * MOBILE VIEW
-   * When the user switches to mobile mode via the toggle bar,
-   * render the MobileApp component directly without the admin shell.
    */
   if (view === 'mobile') {
     return (
       <div style={{ minHeight: '100vh' }}>
-        {/* Toggle bar allowing the user to switch back to Admin mode */}
         <div className="app-toggle-bar">
           <button className="app-toggle-btn" onClick={() => setView('admin')}>Admin Dashboard</button>
           <button className="app-toggle-btn active">Mobile App</button>
         </div>
-        {/* Self-contained mobile/public web app component */}
         <MobileApp />
       </div>
     );
@@ -103,12 +92,6 @@ function App() {
 
   /*
    * ADMIN VIEW
-   * Renders the full admin dashboard with:
-   * - Toggle bar at the top for switching between Admin and Mobile views
-   * - Sidebar navigation on the left
-   * - Topbar with search, notifications, and user profile dropdown
-   * - Main content area that conditionally renders the active page
-   * - Floating Settings Modal overlay
    */
   return (
     <>
@@ -120,26 +103,27 @@ function App() {
 
       {/* Main application shell: sidebar + content area */}
       <div className="app-shell">
-        {/* Left sidebar navigation — highlights current page, calls setPage on click */}
+        {/* Left sidebar navigation — collapsible */}
         <Sidebar
           currentPage={page}
+          isCollapsed={isSidebarCollapsed}
+          onToggleCollapse={handleToggleSidebar}
           onNavigate={setPage}
           onOpenSettings={() => setIsSettingsOpen(true)}
         />
 
         <div className="main-area">
-          {/* Top header bar with page title, search, notifications, user profile and sign out handler */}
+          {/* Top header bar */}
           <Topbar
             title={pageTitles[page] || ''}
             notifications={notifications}
             onMarkAllRead={markAllRead}
             onSignOut={handleSignOut}
-            onSearch={setSearchQuery}
           />
 
-          {/* Page content area — renders the component matching the active page ID */}
-          <PageContainer>
-            {page === 'dashboard' && <Dashboard searchQuery={searchQuery} />}
+          {/* Page content area */}
+          <PageContainer className={page === 'dashboard' ? 'dashboard-page-container' : ''}>
+            {page === 'dashboard' && <Dashboard />}
             {page === 'slots' && <SlotManagement />}
             {page === 'statistics' && <Statistics />}
             {page === 'logs' && <Logs />}

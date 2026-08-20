@@ -1,36 +1,38 @@
 /**
  * Layout.tsx — Application Shell Components
  *
- * This module exports three layout components that form the
+ * This module exports layout components that form the
  * structural skeleton of the admin dashboard:
  *
- * 1. **Sidebar** — Left navigation panel with branding, nav items, and settings
- * 2. **Topbar** — Top header with page title, search, notifications, and user profile dropdown
- * 3. **PageContainer** — Content wrapper that applies consistent padding and scrolling
- *
- * These components are composed in App.tsx to create the admin layout.
+ * 1. **Sidebar** — Left navigation panel with branding, collapsible mode, nav items, and settings
+ * 2. **Topbar** — Top header with page title, notifications, and user profile dropdown
+ * 3. **PageContainer** — Content wrapper that applies consistent padding
  */
 import { useState, useEffect, type ReactNode } from 'react';
-import { IconDashboard, IconChart, IconGrid, IconSettings, IconBell, IconSearch, IconLogs } from '@/components/Icons';
+import {
+  IconDashboard,
+  IconChart,
+  IconGrid,
+  IconSettings,
+  IconBell,
+  IconLogs,
+  IconChevronLeft,
+  IconChevronRight
+} from '@/components/Icons';
 
 /**
  * SidebarProps — Props interface for the Sidebar component.
- * @property currentPage — The currently active page ID for highlighting
- * @property onNavigate — Callback fired when a nav item is clicked
- * @property onOpenSettings — Callback to open the settings modal
  */
 interface SidebarProps {
   currentPage: string;
+  isCollapsed: boolean;
+  onToggleCollapse: () => void;
   onNavigate: (page: string) => void;
   onOpenSettings: () => void;
 }
 
 /**
  * navItems — Configuration array defining all sidebar navigation items.
- * Each item has:
- * - `id`: Internal page identifier (matches pageTitles keys in App.tsx)
- * - `label`: Display text shown in the sidebar
- * - `Icon`: SVG icon component rendered next to the label
  */
 const navItems = [
   { id: 'dashboard', label: 'Dashboard', Icon: IconDashboard },
@@ -40,44 +42,51 @@ const navItems = [
 ];
 
 /**
- * Sidebar — Left-side navigation panel for the admin dashboard.
- *
- * Renders the application branding, a vertical list of navigation buttons,
- * and bottom controls for settings access.
- *
- * @param currentPage — ID of the currently active page
- * @param onNavigate — Callback to switch to a different page
- * @param onOpenSettings — Callback to open settings floating modal
+ * Sidebar — Collapsible left-side navigation panel for the admin dashboard.
  */
-export function Sidebar({ currentPage, onNavigate, onOpenSettings }: SidebarProps) {
+export function Sidebar({
+  currentPage,
+  isCollapsed,
+  onToggleCollapse,
+  onNavigate,
+  onOpenSettings
+}: SidebarProps) {
   return (
-    <aside className="sidebar">
-      {/* Branding section — logo image and app name */}
+    <aside className={`sidebar ${isCollapsed ? 'collapsed' : ''}`}>
+      {/* Branding section — logo and toggle button */}
       <div className="sidebar-brand">
         <img src="/plp.png" alt="Logo" className="sidebar-logo" />
-        <div>
-          <div className="sidebar-title">PLPark</div>
-          <div className="sidebar-subtitle">Admin Console</div>
-        </div>
+        {!isCollapsed && (
+          <div className="sidebar-brand-text">
+            <div className="sidebar-title">PLPark</div>
+            <div className="sidebar-subtitle">Admin Console</div>
+          </div>
+        )}
+        <button
+          className="sidebar-collapse-btn"
+          onClick={onToggleCollapse}
+          title={isCollapsed ? 'Expand sidebar' : 'Collapse sidebar'}
+        >
+          {isCollapsed ? <IconChevronRight size={14} /> : <IconChevronLeft size={14} />}
+        </button>
       </div>
 
-      {/* Navigation items — dynamically rendered from navItems config */}
+      {/* Navigation items */}
       <nav className="sidebar-nav">
         {navItems.map((item) => (
           <button
             key={item.id}
-            /* Apply 'active' class when this item matches the current page */
             className={`nav-item ${currentPage === item.id ? 'active' : ''}`}
             onClick={() => onNavigate(item.id)}
+            title={isCollapsed ? item.label : undefined}
           >
-            {/* Icon component with consistent 18px size */}
             <item.Icon size={18} className="nav-icon" />
-            <span>{item.label}</span>
+            {!isCollapsed && <span>{item.label}</span>}
           </button>
         ))}
       </nav>
 
-      {/* Footer section with Settings access only */}
+      {/* Footer section with Settings access */}
       <div className="sidebar-bottom">
         <button
           className="sidebar-footer-btn"
@@ -85,7 +94,7 @@ export function Sidebar({ currentPage, onNavigate, onOpenSettings }: SidebarProp
           title="Settings"
         >
           <IconSettings size={18} className="nav-icon" />
-          <span className="sidebar-footer-btn-label">Settings</span>
+          {!isCollapsed && <span className="sidebar-footer-btn-label">Settings</span>}
         </button>
       </div>
     </aside>
@@ -94,35 +103,25 @@ export function Sidebar({ currentPage, onNavigate, onOpenSettings }: SidebarProp
 
 /**
  * TopbarProps — Props interface for the Topbar component.
- * @property title — Page title displayed on the left side
- * @property notifications — Array of notification objects for the bell dropdown
- * @property onMarkAllRead — Callback to mark all notifications as read
- * @property onSignOut — Callback fired when the user signs out
  */
 interface TopbarProps {
   title: string;
   notifications: { id: string; type: string; title: string; message: string | null; created_at: string; is_read: boolean }[];
   onMarkAllRead: () => void;
   onSignOut: () => void;
-  onSearch?: (query: string) => void;
 }
 
 /**
- * Topbar — Top header bar for the admin dashboard.
- *
- * Contains page title, search, notification bell, and user profile dropdown.
- *
- * @param title — The title of the currently active page
- * @param notifications — Array of notification objects from useNotifications hook
- * @param onMarkAllRead — Function to mark all notifications as read
- * @param onSignOut — Function to handle user sign out
+ * Topbar — Top header bar for the admin dashboard (Clean layout without search bar).
  */
-export function Topbar({ title, notifications, onMarkAllRead, onSignOut, onSearch }: TopbarProps) {
+export function Topbar({ title, notifications, onMarkAllRead, onSignOut }: TopbarProps) {
   const [isProfileOpen, setIsProfileOpen] = useState(false);
 
   useEffect(() => {
     setIsProfileOpen(false);
   }, [title]);
+
+  const unreadCount = notifications.filter(n => !n.is_read).length;
 
   return (
     <header className="topbar">
@@ -130,37 +129,25 @@ export function Topbar({ title, notifications, onMarkAllRead, onSignOut, onSearc
       <div className="topbar-title">{title}</div>
 
       <div className="topbar-right">
-        {/* Global search input with icon and keyboard shortcut hint */}
-        <div className="topbar-search">
-          <IconSearch size={15} className="search-icon" />
-          <input placeholder="Search plates, sessions..." onChange={event => onSearch?.(event.target.value)} />
-          <span className="search-kbd">Ctrl K</span>
-        </div>
-
         {/* Notification bell with unread count and dropdown */}
         <div className="topbar-notifications">
           <button className="icon-btn notif-btn" title="Notifications">
-            {/* Unread count badge — only shown when there are unread notifications */}
-            {notifications.filter(n => !n.is_read).length > 0 && (
-              <span className="notif-count">{notifications.filter(n => !n.is_read).length}</span>
+            {unreadCount > 0 && (
+              <span className="notif-count">{unreadCount}</span>
             )}
             <IconBell size={18} />
           </button>
 
-          {/* Notification dropdown panel — appears on hover via CSS */}
+          {/* Notification dropdown panel */}
           <div className="notif-dropdown">
             <div className="notif-header">
               <span>Notifications</span>
-              {/* Button to mark all notifications as read */}
               <button onClick={onMarkAllRead}>Mark all read</button>
             </div>
             <div className="notif-list">
-              {/* Empty state when no notifications exist */}
               {notifications.length === 0 && <div className="notif-empty">No notifications</div>}
-              {/* Render up to 8 most recent notifications */}
               {notifications.slice(0, 8).map(n => (
                 <div key={n.id} className={`notif-item ${n.is_read ? 'read' : 'unread'}`}>
-                  {/* Colored dot indicating notification type (success/info/warning/error) */}
                   <span className={`notif-dot notif-${n.type}`} />
                   <div>
                     <div className="notif-item-title">{n.title}</div>
@@ -196,13 +183,7 @@ export function Topbar({ title, notifications, onMarkAllRead, onSignOut, onSearc
 
 /**
  * PageContainer — Wrapper component for page content.
- *
- * Applies consistent padding, scrolling behavior, and layout
- * constraints to whatever page component is rendered inside it.
- * Used in App.tsx to wrap the conditionally-rendered page components.
- *
- * @param children — The page component(s) to render inside the container
  */
-export function PageContainer({ children }: { children: ReactNode }) {
-  return <div className="page-container">{children}</div>;
+export function PageContainer({ children, className = '' }: { children: ReactNode; className?: string }) {
+  return <div className={`page-container ${className}`}>{children}</div>;
 }
