@@ -1518,3 +1518,347 @@ export class ExitProcessor {
   }
 }
 
+// ============================================================
+// 7. SLOT MONITOR PROCESSOR
+// ============================================================
+
+/**
+ * SlotAOIConfig — Configuration for a single slot's AOI polygon.
+ * Points are normalized 0-1 coordinates relative to the camera frame.
+ */
+export interface SlotAOIConfig {
+  /** Human-readable slot identifier, e.g. "A1" */
+  slotId: string;
+  /** UUID primary key from the parking_slots table */
+  dbId: string;
+  /** Ordered polygon vertices as [x, y] pairs, normalized 0-1 */
+  polygon: [number, number][];
+}
+
+/**
+ * SlotDetectionResult — Result of occupancy analysis for a single slot.
+ */
+export interface SlotDetectionResult {
+  slotId: string;
+  dbId: string;
+  occupied: boolean;
+}
+
+/**
+ * isPointInPolygon — Ray casting algorithm to test if a 2D point
+ * lies inside a polygon defined by an array of vertices.
+ *
+ * @param point — [x, y] coordinates of the test point
+ * @param polygon — Array of [x, y] vertices defining the polygon
+ * @returns true if the point is inside the polygon
+ */
+function isPointInPolygon(point: [number, number], polygon: [number, number][]): boolean {
+  let inside = false;
+  for (let i = 0, j = polygon.length - 1; i < polygon.length; j = i++) {
+    const xi = polygon[i][0], yi = polygon[i][1];
+    const xj = polygon[j][0], yj = polygon[j][1];
+    const intersect = ((yi > point[1]) !== (yj > point[1])) &&
+      (point[0] < (xj - xi) * (point[1] - yi) / (yj - yi) + xi);
+    if (intersect) inside = !inside;
+  }
+  return inside;
+}
+
+/**
+ * doesBboxOverlapPolygon — Checks whether any part of a bounding box
+ * overlaps with a polygon. Tests 5 points: center + 4 corners of the bbox.
+ *
+ * @param bbox — [x1, y1, x2, y2] in normalized 0-1 coordinates
+ * @param polygon — polygon vertices in normalized 0-1 coordinates
+ * @returns true if the bbox overlaps the polygon
+ */
+function doesBboxOverlapPolygon(
+  bbox: [number, number, number, number],
+  polygon: [number, number][],
+  frameWidth: number,
+  frameHeight: number
+): boolean {
+  // Convert bbox from pixel coords to normalized 0-1
+  const nx1 = bbox[0] / frameWidth;
+  const ny1 = bbox[1] / frameHeight;
+  const nx2 = bbox[2] / frameWidth;
+  const ny2 = bbox[3] / frameHeight;
+
+  // Test centroid
+  const cx: [number, number] = [(nx1 + nx2) / 2, (ny1 + ny2) / 2];
+  if (isPointInPolygon(cx, polygon)) return true;
+
+  // Test bottom-center (most reliable — wheels touch the ground)
+  const bc: [number, number] = [(nx1 + nx2) / 2, ny2];
+  if (isPointInPolygon(bc, polygon)) return true;
+
+  // Test 4 corners
+  const corners: [number, number][] = [
+    [nx1, ny1], [nx2, ny1], [nx1, ny2], [nx2, ny2]
+  ];
+  for (const corner of corners) {
+    if (isPointInPolygon(corner, polygon)) return true;
+  }
+
+  return false;
+}
+
+/**
+ * SlotMonitorProcessor — Monitors parking slot occupancy using YOLO vehicle
+ * detection and AOI polygon intersection.
+ *
+ * Workflow:
+ * 1. Captures frames from a slot camera at a configurable interval
+ * 2. Runs YOLO detection to find vehicles in the frame
+ * 3. For each configured slot AOI polygon, checks if any vehicle bbox overlaps
+ * 4. Debounces state changes to prevent flicker from momentary detection gaps
+ * 5. Updates Supabase parking_slots status when occupancy changes are confirmed
+ *
+ * Uses the same CameraManager and YOLODetector infrastructure as the
+ * EntranceProcessor and ExitProcessor.
+ */
+export class SlotMonitorProcessor {
+  private cameraManager: CameraManager;
+  private detector: YOLODetector;
+  private slots: SlotAOIConfig[] = [];
+  private intervalId: number | null = null;
+  private _isProcessing = false;
+  private _status: PipelineStatus = 'idle';
+  private _detections: Detection[] = [];
+
+  /**
+   * Occupancy state tracker per slot.
+   * `occupied` = current confirmed state.
+   * `count` = consecutive frames confirming a pending change.
+   */
+  private occupancyState: Map<string, { occupied: boolean; count: number }> = new Map();
+
+  /** Number of consecutive frames required to confirm a state change */
+  private DEBOUNCE_FRAMES = 3;
+
+  /** Interval between frame captures in milliseconds */
+  private FRAME_INTERVAL_MS = 500;
+
+  // Callbacks
+  private statusCallbacks: ((status: PipelineStatus) => void)[] = [];
+  private detectionCallbacks: ((detections: Detection[]) => void)[] = [];
+  private slotChangeCallbacks: ((results: SlotDetectionResult[]) => void)[] = [];
+  private frameCallbacks: (() => void)[] = [];
+
+  constructor() {
+    this.cameraManager = new CameraManager();
+    this.detector = new YOLODetector();
+  }
+
+  // ---- Getters ----
+  get status(): PipelineStatus { return this._status; }
+  get detections(): Detection[] { return this._detections; }
+  get isProcessing(): boolean { return this._isProcessing; }
+  get camera(): CameraManager { return this.cameraManager; }
+
+  // ---- Callback registration ----
+  onStatusChange(cb: (status: PipelineStatus) => void): void { this.statusCallbacks.push(cb); }
+  onDetections(cb: (detections: Detection[]) => void): void { this.detectionCallbacks.push(cb); }
+  onSlotChange(cb: (results: SlotDetectionResult[]) => void): void { this.slotChangeCallbacks.push(cb); }
+  onFrame(cb: () => void): void { this.frameCallbacks.push(cb); }
+
+  private setStatus(status: PipelineStatus): void {
+    this._status = status;
+    this.statusCallbacks.forEach(cb => cb(status));
+  }
+
+  /**
+   * initialize — Loads the YOLO model for vehicle detection.
+   */
+  async initialize(): Promise<void> {
+    this.setStatus('loading');
+    try {
+      await this.detector.loadModel();
+      this.setStatus('idle');
+      console.log('[SlotMonitor] YOLO model loaded, ready to monitor');
+    } catch (err) {
+      this.setStatus('error');
+      throw err;
+    }
+  }
+
+  /**
+   * startCamera — Opens the camera stream and attaches to a video element.
+   */
+  async startCamera(deviceId: string, videoEl: HTMLVideoElement): Promise<void> {
+    await this.cameraManager.startStream(deviceId, videoEl);
+  }
+
+  /**
+   * setSlots — Updates the set of AOI polygons to monitor.
+   * Can be called while processing is active.
+   *
+   * @param slots — Array of slot AOI configurations
+   */
+  setSlots(slots: SlotAOIConfig[]): void {
+    this.slots = slots;
+
+    // Initialize occupancy state for new slots, preserve existing state
+    const existing = new Map(this.occupancyState);
+    this.occupancyState.clear();
+    for (const slot of slots) {
+      const prev = existing.get(slot.dbId);
+      this.occupancyState.set(slot.dbId, prev || { occupied: false, count: 0 });
+    }
+  }
+
+  /**
+   * startProcessing — Begins the periodic frame analysis loop.
+   */
+  startProcessing(): void {
+    if (this.intervalId) return;
+    this._isProcessing = true;
+    this.setStatus('scanning');
+
+    this.intervalId = window.setInterval(async () => {
+      await this.processFrame();
+    }, this.FRAME_INTERVAL_MS);
+  }
+
+  /**
+   * stopProcessing — Stops the analysis loop but keeps camera alive.
+   */
+  stopProcessing(): void {
+    if (this.intervalId) {
+      clearInterval(this.intervalId);
+      this.intervalId = null;
+    }
+    this._isProcessing = false;
+    this.setStatus('idle');
+  }
+
+  /**
+   * stop — Full cleanup: stops processing, releases camera, disposes model.
+   */
+  async stop(): Promise<void> {
+    this.stopProcessing();
+    this.cameraManager.stopStream();
+    this.detector.dispose();
+    this._detections = [];
+    this.occupancyState.clear();
+  }
+
+  /**
+   * processFrame — Core frame analysis method.
+   *
+   * 1. Captures current video frame
+   * 2. Runs YOLO vehicle detection
+   * 3. Checks each slot polygon for vehicle overlap
+   * 4. Debounces state changes
+   * 5. Commits confirmed changes to Supabase
+   */
+  private async processFrame(): Promise<void> {
+    if (!this.detector.isLoaded || !this.cameraManager.isActive) return;
+
+    try {
+      // Capture frame
+      const frame = this.cameraManager.captureFrame();
+      if (!frame) return;
+
+      // Run YOLO detection
+      const detections = await this.detector.detect(frame.imageData, 0.40, 0.45);
+      this._detections = detections;
+      this.detectionCallbacks.forEach(cb => cb(detections));
+
+      // Get frame dimensions for coordinate normalization
+      const frameWidth = frame.imageData.width;
+      const frameHeight = frame.imageData.height;
+
+      // Check slot occupancy for each configured AOI polygon
+      const changes: SlotDetectionResult[] = [];
+
+      for (const slot of this.slots) {
+        if (slot.polygon.length < 3) continue;
+
+        // Check if any vehicle detection overlaps this slot's polygon
+        const vehicleDetections = detections.filter(d => d.vehicleType !== null);
+        const isOccupiedNow = vehicleDetections.some(det =>
+          doesBboxOverlapPolygon(det.bbox, slot.polygon, frameWidth, frameHeight)
+        );
+
+        // Debounce logic
+        const state = this.occupancyState.get(slot.dbId);
+        if (!state) continue;
+
+        if (isOccupiedNow !== state.occupied) {
+          // State is different from confirmed — increment counter
+          state.count++;
+          if (state.count >= this.DEBOUNCE_FRAMES) {
+            // Confirmed state change!
+            state.occupied = isOccupiedNow;
+            state.count = 0;
+            changes.push({
+              slotId: slot.slotId,
+              dbId: slot.dbId,
+              occupied: isOccupiedNow,
+            });
+          }
+        } else {
+          // State matches confirmed — reset counter
+          state.count = 0;
+        }
+      }
+
+      // Commit confirmed changes to Supabase
+      if (changes.length > 0) {
+        await this.updateSlotStatuses(changes);
+        this.slotChangeCallbacks.forEach(cb => cb(changes));
+      }
+
+      // Notify frame callbacks for overlay redraw
+      this.frameCallbacks.forEach(cb => cb());
+    } catch (err) {
+      console.error('[SlotMonitor] Frame processing error:', err);
+    }
+  }
+
+  /**
+   * updateSlotStatuses — Persists occupancy changes to Supabase.
+   *
+   * @param changes — Array of slot state changes to commit
+   */
+  private async updateSlotStatuses(changes: SlotDetectionResult[]): Promise<void> {
+    for (const change of changes) {
+      const newStatus = change.occupied ? 'occupied' : 'available';
+      try {
+        const { error } = await supabase
+          .from('parking_slots')
+          .update({ status: newStatus })
+          .eq('id', change.dbId);
+
+        if (error) {
+          console.error(`[SlotMonitor] Failed to update ${change.slotId}:`, error.message);
+        } else {
+          console.log(`[SlotMonitor] ${change.slotId} → ${newStatus}`);
+        }
+      } catch (err) {
+        console.error(`[SlotMonitor] Error updating ${change.slotId}:`, err);
+      }
+    }
+
+    // Fire notification for occupancy changes
+    const occupiedChanges = changes.filter(c => c.occupied);
+    const availableChanges = changes.filter(c => !c.occupied);
+
+    if (occupiedChanges.length > 0) {
+      await supabase.from('notifications').insert({
+        type: 'info',
+        title: `Vehicle detected in slot${occupiedChanges.length > 1 ? 's' : ''}: ${occupiedChanges.map(c => c.slotId).join(', ')}`,
+        message: `Slot${occupiedChanges.length > 1 ? 's' : ''} marked as occupied by vision monitoring.`,
+      }).then(() => {});
+    }
+
+    if (availableChanges.length > 0) {
+      await supabase.from('notifications').insert({
+        type: 'success',
+        title: `Slot${availableChanges.length > 1 ? 's' : ''} freed: ${availableChanges.map(c => c.slotId).join(', ')}`,
+        message: `Slot${availableChanges.length > 1 ? 's' : ''} marked as available by vision monitoring.`,
+      }).then(() => {});
+    }
+  }
+}

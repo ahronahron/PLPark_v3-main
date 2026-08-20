@@ -19,7 +19,8 @@ import { useEffect, useState } from 'react';
 import { supabase } from '@/lib/supabase';
 import {
   IconCameraConfig, IconRates, IconBackup,
-  IconNotifications, IconLogs, IconSearch, IconDownload
+  IconNotifications, IconLogs, IconSearch, IconDownload,
+  IconCheck, IconTrash
 } from '@/components/Icons';
 
 /** Icon map for settings section tabs */
@@ -293,7 +294,7 @@ export function Settings() {
                               </select>
                             </td>
                             <td><span className={`status-badge ${c.is_online ? 'completed' : 'failed'}`}>{c.is_online ? 'online' : 'offline'}</span></td>
-                            <td><div className="row-actions"><button className="btn-secondary" style={{ padding: '6px 12px' }} onClick={() => handleCameraUpdate(c)}>Save</button><button className="action-btn" title="Remove camera" onClick={() => handleDeleteCamera(c)}>×</button></div></td>
+                            <td><div className="row-actions"><button className="action-btn" title="Save changes" onClick={() => handleCameraUpdate(c)}><IconCheck size={15} /></button><button className="action-btn action-danger" title="Remove camera" onClick={() => handleDeleteCamera(c)}><IconTrash size={15} /></button></div></td>
                           </tr>
                         );
                       })}
