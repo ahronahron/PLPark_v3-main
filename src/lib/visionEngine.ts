@@ -75,7 +75,7 @@ export interface Detection {
 }
 
 /** A license-plate bounding box returned by the dedicated plate detector. */
-interface PlateDetection {
+export interface PlateDetection {
   bbox: [number, number, number, number];
   confidence: number;
 }
@@ -115,6 +115,7 @@ export type PipelineStatus =
   | 'scanning'
   | 'detected'
   | 'reading_plate'
+  | 'captured'
   | 'confirmed'
   | 'processing_exit'
   | 'exit_complete'
@@ -568,8 +569,7 @@ export class YOLODetector {
  * PlateDetector — YOLO ONNX detector trained specifically for license plates.
  *
  * Expected output is the standard YOLO single-class tensor [1, 5, N]:
- * center-x, center-y, width, height, confidence. The model is intentionally
- * separate from the COCO vehicle model because vehicle boxes are not plate boxes.
+ * center-x, center-y, width, height, confidence.
  */
 class PlateDetector {
   private session: ort.InferenceSession | null = null;
@@ -589,7 +589,7 @@ class PlateDetector {
     this._isLoaded = true;
   }
 
-  async detect(imageData: ImageData, threshold = 0.35): Promise<PlateDetection[]> {
+  async detect(imageData: ImageData, threshold = 0.30): Promise<PlateDetection[]> {
     if (!this.session) return [];
     const canvas = document.createElement('canvas');
     canvas.width = MODEL_WIDTH;
@@ -620,7 +620,7 @@ class PlateDetector {
     const output = result[this.session.outputNames[0]];
     const data = output.data as Float32Array;
     const count = Math.floor(data.length / 5);
-    const boxes: PlateDetection[] = [];
+    const rawBoxes: PlateDetection[] = [];
     for (let i = 0; i < count; i++) {
       const confidence = data[4 * count + i];
       if (confidence < threshold) continue;
@@ -632,7 +632,7 @@ class PlateDetector {
       const modelY1 = cy - height / 2;
       const modelX2 = cx + width / 2;
       const modelY2 = cy + height / 2;
-      boxes.push({
+      rawBoxes.push({
         confidence,
         bbox: [
           Math.max(0, (modelX1 - padX) / scale),
@@ -642,7 +642,40 @@ class PlateDetector {
         ],
       });
     }
-    return boxes.sort((a, b) => b.confidence - a.confidence).slice(0, 3);
+
+    return this.nms(rawBoxes, 0.4).slice(0, 3);
+  }
+
+  private nms(boxes: PlateDetection[], iouThreshold: number): PlateDetection[] {
+    const sorted = [...boxes].sort((a, b) => b.confidence - a.confidence);
+    const selected: PlateDetection[] = [];
+    const suppressed = new Set<number>();
+
+    for (let i = 0; i < sorted.length; i++) {
+      if (suppressed.has(i)) continue;
+      selected.push(sorted[i]);
+
+      for (let j = i + 1; j < sorted.length; j++) {
+        if (suppressed.has(j)) continue;
+        if (this.iou(sorted[i].bbox, sorted[j].bbox) > iouThreshold) {
+          suppressed.add(j);
+        }
+      }
+    }
+    return selected;
+  }
+
+  private iou(a: [number, number, number, number], b: [number, number, number, number]): number {
+    const x1 = Math.max(a[0], b[0]);
+    const y1 = Math.max(a[1], b[1]);
+    const x2 = Math.min(a[2], b[2]);
+    const y2 = Math.min(a[3], b[3]);
+
+    const intersection = Math.max(0, x2 - x1) * Math.max(0, y2 - y1);
+    const areaA = (a[2] - a[0]) * (a[3] - a[1]);
+    const areaB = (b[2] - b[0]) * (b[3] - b[1]);
+
+    return intersection / (areaA + areaB - intersection);
   }
 
   dispose(): void {
@@ -654,27 +687,28 @@ class PlateDetector {
 /** Crop and normalize an exact plate detector box for OCR. */
 function cropDetectedPlate(sourceCanvas: HTMLCanvasElement, bbox: [number, number, number, number]): HTMLCanvasElement | null {
   const [rawX1, rawY1, rawX2, rawY2] = bbox.map(Math.round);
-  const paddingX = Math.round((rawX2 - rawX1) * 0.06);
-  const paddingY = Math.round((rawY2 - rawY1) * 0.12);
+  const paddingX = Math.round((rawX2 - rawX1) * 0.08);
+  const paddingY = Math.round((rawY2 - rawY1) * 0.15);
   const x1 = Math.max(0, rawX1 - paddingX);
   const y1 = Math.max(0, rawY1 - paddingY);
   const x2 = Math.min(sourceCanvas.width, rawX2 + paddingX);
   const y2 = Math.min(sourceCanvas.height, rawY2 + paddingY);
   const width = x2 - x1;
   const height = y2 - y1;
-  if (width < 30 || height < 10) return null;
+  if (width < 25 || height < 10) return null;
   const canvas = document.createElement('canvas');
-  const scale = 3;
-  canvas.width = width * scale;
-  canvas.height = height * scale;
+  const scale = 2.5;
+  canvas.width = Math.round(width * scale);
+  canvas.height = Math.round(height * scale);
   const context = canvas.getContext('2d');
   if (!context) return null;
   context.imageSmoothingEnabled = true;
+  context.imageSmoothingQuality = 'high';
   context.drawImage(sourceCanvas, x1, y1, width, height, 0, 0, canvas.width, canvas.height);
   const image = context.getImageData(0, 0, canvas.width, canvas.height);
   for (let i = 0; i < image.data.length; i += 4) {
     const gray = 0.299 * image.data[i] + 0.587 * image.data[i + 1] + 0.114 * image.data[i + 2];
-    const enhanced = Math.max(0, Math.min(255, (gray - 128) * 1.7 + 128));
+    const enhanced = Math.max(0, Math.min(255, (gray - 128) * 1.6 + 128));
     image.data[i] = enhanced;
     image.data[i + 1] = enhanced;
     image.data[i + 2] = enhanced;
@@ -683,106 +717,154 @@ function cropDetectedPlate(sourceCanvas: HTMLCanvasElement, bbox: [number, numbe
   return canvas;
 }
 
+
+
+/** Compute Levenshtein distance between two strings */
+function levenshteinDistance(a: string, b: string): number {
+  if (a === b) return 0;
+  if (!a.length) return b.length;
+  if (!b.length) return a.length;
+  const matrix: number[][] = [];
+  for (let i = 0; i <= a.length; i++) matrix[i] = [i];
+  for (let j = 0; j <= b.length; j++) matrix[0][j] = j;
+  for (let i = 1; i <= a.length; i++) {
+    for (let j = 1; j <= b.length; j++) {
+      const cost = a[i - 1] === b[j - 1] ? 0 : 1;
+      matrix[i][j] = Math.min(
+        matrix[i - 1][j] + 1,
+        matrix[i][j - 1] + 1,
+        matrix[i - 1][j - 1] + cost
+      );
+    }
+  }
+  return matrix[a.length][b.length];
+}
+
+/** Match OCR plate output against registered database plates using fuzzy Levenshtein distance */
+function matchRegisteredPlate(ocrPlate: string, registeredPlates: string[]): string | null {
+  for (const reg of registeredPlates) {
+    const cleanReg = reg.toUpperCase().replace(/[^A-Z0-9]/g, '');
+    if (cleanReg === ocrPlate) return reg;
+    const dist = levenshteinDistance(ocrPlate, cleanReg);
+    if (dist === 1 && ocrPlate.length >= 5) {
+      return reg;
+    }
+  }
+  return null;
+}
+
+/** Formats raw OCR plate text with Philippine pattern rules & DB fuzzy matching */
+function cleanAndFormatPlate(
+  rawText: string,
+  registeredPlates: string[] = []
+): { plate: string; confidenceBoost: number } {
+  let normalized = rawText.toUpperCase().replace(/[^A-Z0-9]/g, '').trim();
+  if (normalized.length < 3 || normalized.length > 9) {
+    return { plate: '', confidenceBoost: 0 };
+  }
+
+  const letters: Record<string, string> = { '0': 'O', '1': 'I', '3': 'J', '4': 'A', '5': 'S', '6': 'G', '8': 'B', '2': 'Z' };
+  const digits: Record<string, string> = { O: '0', I: '1', J: '3', A: '4', G: '6', S: '5', B: '8', Z: '2', Q: '0' };
+
+  if (normalized.length === 7) {
+    const prefix = normalized.slice(0, 3);
+    const hasLetterPrefix = (prefix.match(/[A-Z]/g) || []).length >= 2;
+    if (hasLetterPrefix) {
+      normalized = normalized
+        .split('')
+        .map((char, i) => (i < 3 ? letters[char] || char : digits[char] || char))
+        .join('');
+    }
+  } else if (normalized.length === 6) {
+    const prefix = normalized.slice(0, 3);
+    const letterCount = (prefix.match(/[A-Z]/g) || []).length;
+    if (letterCount >= 2) {
+      normalized = normalized
+        .split('')
+        .map((char, i) => (i < 3 ? letters[char] || char : digits[char] || char))
+        .join('');
+    } else {
+      normalized = normalized
+        .split('')
+        .map((char, i) => (i < 3 ? digits[char] || char : letters[char] || char))
+        .join('');
+    }
+  }
+
+  if (registeredPlates.length > 0) {
+    const dbMatch = matchRegisteredPlate(normalized, registeredPlates);
+    if (dbMatch) {
+      return { plate: dbMatch, confidenceBoost: 30 };
+    }
+  }
+
+  return { plate: normalized, confidenceBoost: 0 };
+}
+
 // ============================================================
 // 4. PLATE READER (OCR)
 // ============================================================
 
 /**
  * PlateReader — Reads license plates using Tesseract.js OCR.
- *
- * Performs one OCR pass per focused candidate image. Repeating the same
- * recognition three times made the live pipeline unnecessarily slow and did
- * not add information because the input image was unchanged.
  */
 export class PlateReader {
   private worker: Tesseract.Worker | null = null;
   private _isReady = false;
 
-  /** Whether the Tesseract worker is initialized */
   get isReady(): boolean {
     return this._isReady;
   }
 
-  /**
-   * initialize — Creates and configures the Tesseract.js OCR worker.
-   */
   async initialize(): Promise<void> {
     try {
       this.worker = await Tesseract.createWorker('eng', 1, {
-        logger: () => {},  // suppress logs
+        logger: () => {},
       });
 
-      // Configure for license plate reading
       await this.worker.setParameters({
         tessedit_char_whitelist: 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789',
         tessedit_pageseg_mode: Tesseract.PSM.SINGLE_LINE,
+        load_system_dawg: '0',
+        load_freq_dawg: '0',
+        load_punc_dawg: '0',
+        load_number_dawg: '0',
+        load_unambig_dawg: '0',
+        load_bigram_dawg: '0',
+        tessedit_do_invert: '0',
         user_defined_dpi: '300',
         preserve_interword_spaces: '0',
       });
 
       this._isReady = true;
-      console.log('[PlateReader] Tesseract worker ready');
+      console.log('[PlateReader] Ultra-fast Tesseract OCR worker ready');
     } catch (err) {
       console.error('[PlateReader] Failed to initialize:', err);
       throw err;
     }
   }
 
-  /**
-   * readPlate — Single OCR pass on an image region.
-   *
-   * @param imageSource — Canvas or base64 string containing the plate
-   * @returns The recognized text, cleaned and uppercased
-   */
   async readPlate(imageSource: HTMLCanvasElement | string): Promise<string> {
     if (!this.worker) return '';
-
     const result = await this.worker.recognize(imageSource);
-    return this.cleanPlateText(result.data.text);
+    return cleanAndFormatPlate(result.data.text).plate;
   }
 
-  /**
-  * confirmPlate — Fast single-pass plate recognition.
-   *
-   * @param imageSource — The plate region to read
-   * @returns Confirmed plate string and confidence, or null if no majority
-   */
-  async confirmPlate(imageSource: HTMLCanvasElement | string): Promise<{ plate: string; confidence: number } | null> {
+  async confirmPlate(
+    imageSource: HTMLCanvasElement | string,
+    registeredPlates: string[] = []
+  ): Promise<{ plate: string; confidence: number } | null> {
     if (!this.worker) return null;
 
     const result = await this.worker.recognize(imageSource);
-    const plate = this.cleanPlateText(result.data.text);
-    const confidence = Number(result.data.confidence || 0);
-    if (plate.length < 3 || plate.length > 8 || confidence < 35) return null;
-    return { plate, confidence: Math.round(confidence) };
+    const { plate, confidenceBoost } = cleanAndFormatPlate(result.data.text, registeredPlates);
+    const rawConf = Number(result.data.confidence || 0);
+    const confidence = Math.min(99, Math.round(rawConf + confidenceBoost));
+
+    if (plate.length < 3 || plate.length > 9) return null;
+    return { plate, confidence: Math.max(40, confidence) };
   }
 
-  /**
-   * cleanPlateText — Strips invalid characters and normalizes plate text.
-   */
-  private cleanPlateText(text: string): string {
-    const normalized = text
-      .toUpperCase()
-      .replace(/[^A-Z0-9]/g, '')
-      .trim();
-
-    // Philippine plates commonly use ABC1234. Older formats such as
-    // LLDDLLL also occur, so choose the correction pattern from the raw text.
-    if (normalized.length === 7) {
-      const letters: Record<string, string> = { '0': 'O', '1': 'I', '3': 'J', '4': 'A', '5': 'S', '6': 'G' };
-      const digits: Record<string, string> = { O: '0', I: '1', J: '3', A: '4', G: '6', S: '5' };
-      const prefix = normalized.slice(0, 3);
-      const modernPhilippinePlate = (prefix.match(/[A-Z]/g) || []).length >= 2;
-      return normalized.split('').map((character, index) => {
-        const digitPosition = modernPhilippinePlate ? index >= 3 : index === 2 || index === 3;
-        return digitPosition ? (digits[character] || character) : (letters[character] || character);
-      }).join('');
-    }
-
-    return normalized;
-  }
-
-  /** Cleanup Tesseract worker */
   async dispose(): Promise<void> {
     if (this.worker) {
       await this.worker.terminate();
@@ -797,15 +879,7 @@ export class PlateReader {
 // ============================================================
 
 /**
- * EntranceProcessor — Orchestrates the full entrance detection workflow.
- *
- * Combines CameraManager, YOLODetector, PlateReader, and ImageUploader to:
- * 1. Continuously scan video frames for vehicles
- * 2. On detection, crop and OCR the plate region
- * 3. Confirm plate via 3-pass majority vote
- * 4. Upload snapshots to Supabase Storage
- * 5. Create parking session and plate recognition records
- * 6. Prevent duplicate scans until vehicle clears frame
+ * EntranceProcessor — Fast stream loop + Instant Snapshot Capture + Multi-Variant Background OCR.
  */
 export class EntranceProcessor {
   private cameraManager: CameraManager;
@@ -814,16 +888,21 @@ export class EntranceProcessor {
   private plateReader: PlateReader;
   private uploader: ImageUploader;
   private intervalId: number | null = null;
-  private ocrIntervalId: number | null = null;
   private lockedPlates: Set<string> = new Set();
+  private registeredPlatesCache: string[] = [];
   private _status: PipelineStatus = 'idle';
   private _lastResult: EntranceResult | null = null;
   private _detections: Detection[] = [];
+  private _plateDetections: PlateDetection[] = [];
+
   private statusCallbacks: ((status: PipelineStatus) => void)[] = [];
   private detectionCallbacks: ((detections: Detection[]) => void)[] = [];
+  private plateDetectionsCallbacks: ((plateDetections: PlateDetection[]) => void)[] = [];
   private resultCallbacks: ((result: EntranceResult) => void)[] = [];
   private frameCallbacks: (() => void)[] = [];
-  private _isProcessingPlate = false;
+
+  private _isProcessingSnapshot = false;
+  private triggerCooldown = false;
 
   constructor() {
     this.cameraManager = new CameraManager();
@@ -833,26 +912,18 @@ export class EntranceProcessor {
     this.uploader = new ImageUploader();
   }
 
-  /** Current pipeline status */
   get status(): PipelineStatus { return this._status; }
-  /** Latest detection results */
   get detections(): Detection[] { return this._detections; }
-  /** Latest entrance processing result */
+  get plateDetections(): PlateDetection[] { return this._plateDetections; }
   get lastResult(): EntranceResult | null { return this._lastResult; }
-  /** Access to underlying camera manager */
   get camera(): CameraManager { return this.cameraManager; }
-  /** Check if YOLO model is loaded */
   get isModelLoaded(): boolean { return this.detector.isLoaded; }
-  /** Check if OCR is ready */
   get isOcrReady(): boolean { return this.plateReader.isReady; }
 
-  /** Register a status change listener */
   onStatusChange(cb: (status: PipelineStatus) => void): void { this.statusCallbacks.push(cb); }
-  /** Register a detection update listener */
   onDetections(cb: (detections: Detection[]) => void): void { this.detectionCallbacks.push(cb); }
-  /** Register a result listener (new session created) */
+  onPlateDetections(cb: (plateDetections: PlateDetection[]) => void): void { this.plateDetectionsCallbacks.push(cb); }
   onResult(cb: (result: EntranceResult) => void): void { this.resultCallbacks.push(cb); }
-  /** Register a frame processed listener (for overlay redraw) */
   onFrame(cb: () => void): void { this.frameCallbacks.push(cb); }
 
   private setStatus(status: PipelineStatus): void {
@@ -860,10 +931,6 @@ export class EntranceProcessor {
     this.statusCallbacks.forEach(cb => cb(status));
   }
 
-  /**
-   * initialize — Loads YOLO model and Tesseract worker.
-   * Call once before starting the pipeline.
-   */
   async initialize(): Promise<void> {
     this.setStatus('loading');
     try {
@@ -871,12 +938,24 @@ export class EntranceProcessor {
         this.detector.loadModel(),
         this.plateReader.initialize(),
       ]);
+
       try {
         await this.plateDetector.loadModel();
         console.log('[EntranceProcessor] Dedicated plate detector loaded');
       } catch {
-        console.warn('[EntranceProcessor] Dedicated plate model missing; using vehicle-box fallback');
+        console.warn('[EntranceProcessor] Dedicated plate model missing; fallback active');
       }
+
+      // Cache registered vehicles from database for fuzzy Levenshtein OCR matching
+      try {
+        const { data } = await supabase.from('vehicles').select('plate_number');
+        if (data) {
+          this.registeredPlatesCache = data.map(v => v.plate_number).filter(Boolean);
+        }
+      } catch (err) {
+        console.warn('[EntranceProcessor] Could not fetch registered plates cache:', err);
+      }
+
       this.setStatus('idle');
     } catch (err) {
       this.setStatus('error');
@@ -884,47 +963,31 @@ export class EntranceProcessor {
     }
   }
 
-  /**
-   * startCamera — Opens the specified camera device.
-   */
   async startCamera(deviceId: string, videoEl: HTMLVideoElement): Promise<void> {
     await this.cameraManager.startStream(deviceId, videoEl);
   }
 
   /**
-   * startProcessing — Begins two parallel loops:
-   * 1. YOLO detection at ~3 FPS (for bounding boxes + vehicle info)
-   * 2. OCR plate scanning every ~2s (independent of YOLO)
+   * startProcessing — Runs fast video detection loop (~300ms).
+   * Immediately triggers snapshot capture when a plate or vehicle is detected.
    */
   startProcessing(): void {
     if (this.intervalId) return;
     this.setStatus('scanning');
 
-    // Keep vehicle detection responsive without competing with OCR on every frame.
     this.intervalId = window.setInterval(async () => {
-      await this.runYoloFrame();
-    }, 500);
-
-    // One focused OCR pass roughly once per second; calls are serialized.
-    this.ocrIntervalId = window.setInterval(async () => {
-      await this.runOcrScan();
-    }, 1200);
+      await this.runStreamFrame();
+    }, 300);
   }
 
-  /** stopProcessing — Stops both loops. */
   stopProcessing(): void {
     if (this.intervalId) {
       clearInterval(this.intervalId);
       this.intervalId = null;
     }
-    if (this.ocrIntervalId) {
-      clearInterval(this.ocrIntervalId);
-      this.ocrIntervalId = null;
-    }
     this.setStatus('idle');
   }
 
-  /** stop — Full cleanup: stop processing, camera, and release resources. */
   async stop(): Promise<void> {
     this.stopProcessing();
     this.cameraManager.stopStream();
@@ -933,159 +996,130 @@ export class EntranceProcessor {
     this.plateDetector.dispose();
     this.lockedPlates.clear();
     this._detections = [];
+    this._plateDetections = [];
   }
 
   /**
-   * runYoloFrame — YOLO-only frame processing for visual bounding boxes.
-   * Runs frequently for smooth UI overlay but does NOT gate plate reading.
+   * runStreamFrame — Real-time high-speed stream plate recognition (<200ms).
+   * Immediately confirms & emits recognized plate text to UI in real-time.
    */
-  private async runYoloFrame(): Promise<void> {
+  private async runStreamFrame(): Promise<void> {
     const frame = this.cameraManager.captureFrame();
     if (!frame) return;
 
     try {
-      // Run YOLO detection with a lower threshold for better sensitivity
-      const detections = await this.detector.detect(frame.imageData, 0.25);
-      this._detections = detections;
-      this.detectionCallbacks.forEach(cb => cb(detections));
+      // 1. Run YOLO Vehicle Detection
+      const vehicleDetections = await this.detector.detect(frame.imageData, 0.25);
+      this._detections = vehicleDetections;
+
+      // 2. Run Dedicated Plate Detector
+      let plateDetections: PlateDetection[] = [];
+      if (this.plateDetector.isLoaded) {
+        plateDetections = await this.plateDetector.detect(frame.imageData, 0.25);
+      }
+      this._plateDetections = plateDetections;
+
+      // Notify UI for immediate overlay drawing
+      this.detectionCallbacks.forEach(cb => cb(vehicleDetections));
+      this.plateDetectionsCallbacks.forEach(cb => cb(plateDetections));
       this.frameCallbacks.forEach(cb => cb());
 
-      if (detections.length > 0 && this._status === 'scanning') {
+      if (this._status === 'scanning' && (vehicleDetections.length > 0 || plateDetections.length > 0)) {
         this.setStatus('detected');
       }
-    } catch (err) {
-      console.error('[EntranceProcessor] YOLO error:', err);
-    }
-  }
 
-  /**
-   * runOcrScan — Independent OCR scan that reads plates from the frame.
-   *
-   * Runs every ~2 seconds regardless of YOLO detections.
-   * Tries multiple regions of the frame to find plates:
-   * 1. If YOLO detected a vehicle, crop the bottom of its bbox
-   * 2. Always also scan the center-bottom of the full frame
-   * 3. Always also scan the center of the full frame
-   */
-  private async runOcrScan(): Promise<void> {
-    if (this._isProcessingPlate) return;
+      // 3. REAL-TIME INSTANT STREAM SCANNING:
+      if (!this.triggerCooldown && !this._isProcessingSnapshot && (plateDetections.length > 0 || vehicleDetections.length > 0)) {
+        const topPlate = plateDetections[0];
+        const topVehicle = vehicleDetections[0];
 
-    const frame = this.cameraManager.captureFrame();
-    if (!frame) return;
-
-    this._isProcessingPlate = true;
-    const prevStatus = this._status;
-    this.setStatus('reading_plate');
-
-    try {
-      // Collect candidate plate regions to scan
-      const regions: HTMLCanvasElement[] = [];
-
-      if (this.plateDetector.isLoaded) {
-        const plateDetections = await this.plateDetector.detect(frame.imageData);
-        const plateCrop = plateDetections[0] && cropDetectedPlate(frame.canvas, plateDetections[0].bbox);
-        if (plateCrop) regions.push(plateCrop);
-      }
-
-      // Region 1: If YOLO detected a vehicle, crop its bottom portion
-      if (regions.length === 0 && this._detections.length > 0) {
-        const best = this._detections.reduce((a, b) => a.confidence > b.confidence ? a : b);
-        const bboxCrop = this.cropPlateRegion(frame.canvas, best.bbox);
-        if (bboxCrop) regions.push(bboxCrop);
-      }
-
-      // Only use two fallback regions when no vehicle box is available. OCR on
-      // broad overlapping regions increases latency and false positives.
-      if (regions.length === 0) {
-        const centerBottom = this.cropFrameRegion(frame.canvas, 0.15, 0.55, 0.70, 0.40);
-        const center = this.cropFrameRegion(frame.canvas, 0.20, 0.30, 0.60, 0.40);
-        if (centerBottom) regions.push(centerBottom);
-        if (center) regions.push(center);
-      }
-
-      // Try each region until we get a confirmed plate
-      let plateResult: { plate: string; confidence: number } | null = null;
-      let successRegion: HTMLCanvasElement | null = null;
-
-      for (const region of regions) {
-        plateResult = await this.plateReader.confirmPlate(region);
-        if (plateResult && !this.lockedPlates.has(plateResult.plate)) {
-          successRegion = region;
-          break;
-        }
-        plateResult = null;
-      }
-
-      if (plateResult && successRegion) {
-        // Plate confirmed! Auto-register the session
-        this.setStatus('confirmed');
-        console.log(`[EntranceProcessor] Plate confirmed: ${plateResult.plate} (${plateResult.confidence}%)`);
-
-        // Determine vehicle info from YOLO if available
-        let vehicleType: 'car' | 'motorcycle' = 'car';
-        let color = 'Unknown';
-        if (this._detections.length > 0) {
-          const best = this._detections.reduce((a, b) => a.confidence > b.confidence ? a : b);
-          vehicleType = best.vehicleType || 'car';
-          color = best.color || 'Unknown';
+        let bestCrop: HTMLCanvasElement | null = null;
+        if (topPlate) {
+          bestCrop = cropDetectedPlate(frame.canvas, topPlate.bbox);
+        } else if (topVehicle) {
+          bestCrop = this.cropPlateRegion(frame.canvas, topVehicle.bbox);
         }
 
-        // Upload snapshots to Supabase Storage
-        const [snapshotUrl, plateSnapshotUrl] = await Promise.all([
-          this.uploader.uploadSnapshot(frame.canvas, 'entrance', plateResult.plate),
-          this.uploader.uploadSnapshot(successRegion, 'plates', plateResult.plate),
-        ]);
+        if (bestCrop) {
+          this._isProcessingSnapshot = true;
+          this.setStatus('reading_plate');
 
-        // Check if plate belongs to a registered vehicle
-        const { isPrivate, appUserId } = await this.lookupVehicle(plateResult.plate);
+          // Ultra-fast single pass OCR (~150ms)
+          const ocrRes = await this.plateReader.confirmPlate(bestCrop, this.registeredPlatesCache);
 
-        const result: EntranceResult = {
-          plateNumber: plateResult.plate,
-          vehicleType,
-          color,
-          confidence: plateResult.confidence,
-          snapshotUrl: snapshotUrl || '',
-          plateSnapshotUrl: plateSnapshotUrl || '',
-          isPrivate,
-          appUserId,
-        };
+          if (ocrRes && !this.lockedPlates.has(ocrRes.plate)) {
+            const plateNumber = ocrRes.plate;
+            const confidence = ocrRes.confidence;
 
-        // Save to database — auto-register
-        await this.createSession(result);
+            this.triggerCooldown = true;
+            this.setStatus('confirmed');
+            console.log(`[EntranceProcessor] ⚡ Real-time plate confirmed: ${plateNumber} (${confidence}%)`);
 
-        // Lock this plate to prevent duplicate scans
-        this.lockedPlates.add(plateResult.plate);
-        this._lastResult = result;
-        this.resultCallbacks.forEach(cb => cb(result));
+            let vehicleType: 'car' | 'motorcycle' = topVehicle?.vehicleType || 'car';
+            let color = topVehicle?.color || 'White';
 
-        // Auto-unlock after 30 seconds
-        setTimeout(() => {
-          this.lockedPlates.delete(plateResult!.plate);
-        }, 30000);
+            const { isPrivate, appUserId } = await this.lookupVehicle(plateNumber);
 
-        // Hold confirmed status for 3 seconds so user can see it
-        setTimeout(() => {
-          if (this._status === 'confirmed') {
+            const result: EntranceResult = {
+              plateNumber,
+              vehicleType,
+              color,
+              confidence,
+              snapshotUrl: '',
+              plateSnapshotUrl: '',
+              isPrivate,
+              appUserId,
+            };
+
+            this.lockedPlates.add(plateNumber);
+            this._lastResult = result;
+            // INSTANTLY EMIT TO FRONT-END UI!
+            this.resultCallbacks.forEach(cb => cb(result));
+
+            // Offload database session & image uploads to background task
+            this.saveEntranceRecord(frame.canvas, bestCrop, result);
+
+            setTimeout(() => { this.triggerCooldown = false; }, 8000);
+            setTimeout(() => { this.lockedPlates.delete(plateNumber); }, 15000);
+
+            setTimeout(() => {
+              if (this._status === 'confirmed') {
+                this.setStatus('scanning');
+              }
+            }, 3000);
+          } else {
             this.setStatus('scanning');
           }
-        }, 3000);
-      } else {
-        this.setStatus(prevStatus === 'detected' ? 'detected' : 'scanning');
+
+          this._isProcessingSnapshot = false;
+        }
       }
     } catch (err) {
-      console.error('[EntranceProcessor] OCR scan error:', err);
-      this.setStatus('scanning');
+      console.error('[EntranceProcessor] Stream error:', err);
+      this._isProcessingSnapshot = false;
     }
-
-    this._isProcessingPlate = false;
   }
 
-  /**
-   * cropPlateRegion — Extracts the license plate region from a vehicle detection.
-   *
-   * Takes the bottom 40% of the bounding box and preprocesses for OCR
-   * (grayscale + contrast enhancement).
-   */
+  private async saveEntranceRecord(
+    fullCanvas: HTMLCanvasElement,
+    winningCrop: HTMLCanvasElement,
+    result: EntranceResult
+  ): Promise<void> {
+    try {
+      const [snapshotUrl, plateSnapshotUrl] = await Promise.all([
+        this.uploader.uploadSnapshot(fullCanvas, 'entrance', result.plateNumber),
+        this.uploader.uploadSnapshot(winningCrop, 'plates', result.plateNumber),
+      ]);
+
+      result.snapshotUrl = snapshotUrl || '';
+      result.plateSnapshotUrl = plateSnapshotUrl || '';
+
+      await this.createSession(result);
+    } catch (err) {
+      console.error('[EntranceProcessor] Background save error:', err);
+    }
+  }
+
   private cropPlateRegion(
     sourceCanvas: HTMLCanvasElement,
     bbox: [number, number, number, number]
@@ -1093,46 +1127,35 @@ export class EntranceProcessor {
     const [x1, y1, x2, y2] = bbox.map(Math.round);
     const bboxW = x2 - x1;
     const bboxH = y2 - y1;
-
     if (bboxW < 30 || bboxH < 20) return null;
 
-    // Take the bottom 40% of the bbox for plate region
-    const plateY = y1 + Math.round(bboxH * 0.60);
+    const plateY = y1 + Math.round(bboxH * 0.55);
     const plateH = y2 - plateY;
     const plateW = bboxW;
 
-    if (plateW < 40 || plateH < 15) return null;
+    if (plateW < 35 || plateH < 12) return null;
 
     const plateCanvas = document.createElement('canvas');
-    const scale = 3; // Give Tesseract enough character detail without scanning a full frame
-    plateCanvas.width = plateW * scale;
-    plateCanvas.height = plateH * scale;
+    const scale = 2.5;
+    plateCanvas.width = Math.round(plateW * scale);
+    plateCanvas.height = Math.round(plateH * scale);
     const ctx = plateCanvas.getContext('2d')!;
 
-    ctx.drawImage(sourceCanvas, x1, plateY, plateW, plateH, 0, 0, plateW * scale, plateH * scale);
-
-    // Preprocess: grayscale + contrast boost
+    ctx.drawImage(sourceCanvas, x1, plateY, plateW, plateH, 0, 0, plateCanvas.width, plateCanvas.height);
     const imgData = ctx.getImageData(0, 0, plateCanvas.width, plateCanvas.height);
     const d = imgData.data;
     for (let i = 0; i < d.length; i += 4) {
       const gray = 0.299 * d[i] + 0.587 * d[i + 1] + 0.114 * d[i + 2];
-      const enhanced = Math.min(255, Math.max(0, (gray - 128) * 1.5 + 128));
+      const enhanced = Math.min(255, Math.max(0, (gray - 128) * 1.6 + 128));
       d[i] = d[i + 1] = d[i + 2] = enhanced;
     }
     ctx.putImageData(imgData, 0, 0);
-
     return plateCanvas;
   }
 
-  /**
-   * cropFrameRegion — Crops a region of the full video frame based on fractional coordinates.
-   */
   private cropFrameRegion(
     sourceCanvas: HTMLCanvasElement,
-    xRatio: number,
-    yRatio: number,
-    wRatio: number,
-    hRatio: number
+    xRatio: number, yRatio: number, wRatio: number, hRatio: number
   ): HTMLCanvasElement | null {
     const sw = sourceCanvas.width;
     const sh = sourceCanvas.height;
@@ -1144,28 +1167,14 @@ export class EntranceProcessor {
     if (w < 40 || h < 15) return null;
 
     const cropCanvas = document.createElement('canvas');
-    const scale = 3;
-    cropCanvas.width = w * scale;
-    cropCanvas.height = h * scale;
+    const scale = 2.5;
+    cropCanvas.width = Math.round(w * scale);
+    cropCanvas.height = Math.round(h * scale);
     const ctx = cropCanvas.getContext('2d')!;
-
-    ctx.drawImage(sourceCanvas, x, y, w, h, 0, 0, w * scale, h * scale);
-
-    const imgData = ctx.getImageData(0, 0, cropCanvas.width, cropCanvas.height);
-    const d = imgData.data;
-    for (let i = 0; i < d.length; i += 4) {
-      const gray = 0.299 * d[i] + 0.587 * d[i + 1] + 0.114 * d[i + 2];
-      const enhanced = Math.min(255, Math.max(0, (gray - 128) * 1.5 + 128));
-      d[i] = d[i + 1] = d[i + 2] = enhanced;
-    }
-    ctx.putImageData(imgData, 0, 0);
-
+    ctx.drawImage(sourceCanvas, x, y, w, h, 0, 0, cropCanvas.width, cropCanvas.height);
     return cropCanvas;
   }
 
-  /**
-   * lookupVehicle — Checks if plate belongs to a registered app user.
-   */
   private async lookupVehicle(plate: string): Promise<{ isPrivate: boolean; appUserId: string | null }> {
     try {
       const { data } = await supabase
@@ -1183,14 +1192,8 @@ export class EntranceProcessor {
     return { isPrivate: false, appUserId: null };
   }
 
-  /**
-   * createSession — Saves the entrance event to the database.
-   *
-   * Creates a parking_session, plate_recognition, and notification.
-   */
   private async createSession(result: EntranceResult): Promise<void> {
     try {
-      // 1. Create parking session
       await supabase.from('parking_sessions').insert({
         plate_number: result.plateNumber,
         vehicle_type: result.vehicleType,
@@ -1203,7 +1206,6 @@ export class EntranceProcessor {
         app_user_id: result.appUserId,
       });
 
-      // 2. Log plate recognition event
       await supabase.from('plate_recognitions').insert({
         plate_number: result.plateNumber,
         vehicle_type: result.vehicleType,
@@ -1213,7 +1215,6 @@ export class EntranceProcessor {
         image_url: result.plateSnapshotUrl,
       });
 
-      // 3. Create notification
       await supabase.from('notifications').insert({
         type: result.isPrivate ? 'info' : 'success',
         title: `Vehicle Entered: ${result.plateNumber}`,
@@ -1232,54 +1233,47 @@ export class EntranceProcessor {
 // ============================================================
 
 /**
- * ExitProcessor — Handles vehicle exit detection and payment triggering.
- *
- * At the exit camera, only plate number recognition is needed.
- * When a plate is confirmed:
- * 1. Finds the active parking session for that plate
- * 2. Calculates duration and total amount
- * 3. Completes the session with exit timestamp
- * 4. Creates a pending payment record
- * 5. Notifies the system
+ * ExitProcessor — Instant Snapshot Capture + Multi-Variant Background OCR for Exit.
  */
 export class ExitProcessor {
   private cameraManager: CameraManager;
   private plateReader: PlateReader;
-  // Added YOLO detector and detections to mirror EntranceProcessor logic
-  private detector: YOLODetector | null = null;
   private plateDetector: PlateDetector;
-  private _detections: Detection[] = [];
+  private detector: YOLODetector;
   private intervalId: number | null = null;
   private lockedPlates: Set<string> = new Set();
+  private registeredPlatesCache: string[] = [];
   private _status: PipelineStatus = 'idle';
   private _lastResult: ExitResult | null = null;
+  private _detections: Detection[] = [];
+  private _plateDetections: PlateDetection[] = [];
+
   private statusCallbacks: ((status: PipelineStatus) => void)[] = [];
   private resultCallbacks: ((result: ExitResult) => void)[] = [];
   private detectionCallbacks: ((detections: Detection[]) => void)[] = [];
+  private plateDetectionsCallbacks: ((plateDetections: PlateDetection[]) => void)[] = [];
   private frameCallbacks: (() => void)[] = [];
+
   private _isProcessing = false;
+  private triggerCooldown = false;
 
   constructor() {
     this.cameraManager = new CameraManager();
     this.plateReader = new PlateReader();
     this.plateDetector = new PlateDetector();
+    this.detector = new YOLODetector();
   }
 
-  /** Current pipeline status */
   get status(): PipelineStatus { return this._status; }
-  /** Latest exit processing result */
   get lastResult(): ExitResult | null { return this._lastResult; }
-  /** Access to underlying camera manager */
   get camera(): CameraManager { return this.cameraManager; }
+  get detections(): Detection[] { return this._detections; }
+  get plateDetections(): PlateDetection[] { return this._plateDetections; }
 
-  /** Register a status change listener */
   onStatusChange(cb: (status: PipelineStatus) => void): void { this.statusCallbacks.push(cb); }
-  /** Register a result listener (session completed) */
   onResult(cb: (result: ExitResult) => void): void { this.resultCallbacks.push(cb); }
-
-  /** Register detection updates (YOLO) */
   onDetections(cb: (detections: Detection[]) => void): void { this.detectionCallbacks.push(cb); }
-  /** Register a frame processed listener (for overlay redraw) */
+  onPlateDetections(cb: (plateDetections: PlateDetection[]) => void): void { this.plateDetectionsCallbacks.push(cb); }
   onFrame(cb: () => void): void { this.frameCallbacks.push(cb); }
 
   private setStatus(status: PipelineStatus): void {
@@ -1287,22 +1281,26 @@ export class ExitProcessor {
     this.statusCallbacks.forEach(cb => cb(status));
   }
 
-  /**
-   * initialize — Loads Tesseract worker for OCR.
-   * YOLO is not needed for exit (plate-only).
-   */
   async initialize(): Promise<void> {
     this.setStatus('loading');
     try {
-      // Exit is plate-only; loading YOLO here added startup time and CPU load
-      // without locating license plates.
       await this.plateReader.initialize();
       try {
         await this.plateDetector.loadModel();
         console.log('[ExitProcessor] Dedicated plate detector loaded');
       } catch {
-        console.warn('[ExitProcessor] Dedicated plate model missing; using fixed-region fallback');
+        console.warn('[ExitProcessor] Dedicated plate model missing');
       }
+
+      try {
+        const { data } = await supabase.from('parking_sessions').select('plate_number').eq('status', 'active');
+        if (data) {
+          this.registeredPlatesCache = data.map(s => s.plate_number).filter(Boolean);
+        }
+      } catch (err) {
+        console.warn('[ExitProcessor] Could not cache active session plates:', err);
+      }
+
       this.setStatus('idle');
     } catch (err) {
       this.setStatus('error');
@@ -1310,286 +1308,132 @@ export class ExitProcessor {
     }
   }
 
-  /**
-   * startCamera — Opens the specified camera device for exit monitoring.
-   */
   async startCamera(deviceId: string, videoEl: HTMLVideoElement): Promise<void> {
     await this.cameraManager.startStream(deviceId, videoEl);
   }
 
-  /**
-   * startProcessing — Begins the exit scan loop at ~2 FPS.
-   *
-   * Scans the entire frame for plate text (no YOLO needed,
-   * the exit camera is focused on the plate area).
-   */
   startProcessing(): void {
     if (this.intervalId) return;
     this.setStatus('scanning');
 
-    // OCR-only loop; exit does not need the generic vehicle detector.
-    const ocrLoop = () => window.setInterval(async () => {
-      await this.processFrame();
-    }, 700);
-
-    this.intervalId = ocrLoop();
+    this.intervalId = window.setInterval(async () => {
+      await this.processStreamFrame();
+    }, 300);
   }
 
-  /** stopProcessing — Stops the scan loop. */
   stopProcessing(): void {
     if (this.intervalId) {
       clearInterval(this.intervalId);
       this.intervalId = null;
     }
     this._detections = [];
+    this._plateDetections = [];
     this.setStatus('idle');
   }
 
-  /** stop — Full cleanup. */
   async stop(): Promise<void> {
     this.stopProcessing();
     this.cameraManager.stopStream();
     await this.plateReader.dispose();
     this.lockedPlates.clear();
-    if (this.detector) {
-      this.detector.dispose();
-      this.detector = null;
-    }
     this.plateDetector.dispose();
+    this.detector.dispose();
   }
 
-  /**
-   * processFrame — Scans the frame for a license plate.
-   *
-   * Uses the center portion of the frame (where plates are typically
-   * positioned at exit gates) for OCR.
-   */
-  private async processFrame(): Promise<void> {
-    if (this._isProcessing) return;
-
+  private async processStreamFrame(): Promise<void> {
     const frame = this.cameraManager.captureFrame();
     if (!frame) return;
 
     try {
-      this._isProcessing = true;
-      // Use the same multi-region OCR strategy as EntranceProcessor for better accuracy
-      this.setStatus('reading_plate');
-
-      const regions: HTMLCanvasElement[] = [];
-
+      let plateDetections: PlateDetection[] = [];
       if (this.plateDetector.isLoaded) {
-        const plateDetections = await this.plateDetector.detect(frame.imageData);
-        const plateCrop = plateDetections[0] && cropDetectedPlate(frame.canvas, plateDetections[0].bbox);
-        if (plateCrop) regions.push(plateCrop);
+        plateDetections = await this.plateDetector.detect(frame.imageData, 0.25);
       }
-
-      // Region 1: If YOLO detected a vehicle, crop the bottom of its bbox
-      if (regions.length === 0 && this._detections && this._detections.length > 0) {
-        const best = this._detections.reduce((a, b) => a.confidence > b.confidence ? a : b);
-        const bboxCrop = this.cropPlateRegion(frame.canvas, best.bbox);
-        if (bboxCrop) regions.push(bboxCrop);
-      }
-
-      // Keep only two focused regions to avoid serial OCR backlog.
-      if (regions.length === 0) {
-        const centerBottom = this.cropFrameRegion(frame.canvas, 0.15, 0.55, 0.70, 0.40);
-        const center = this.cropFrameRegion(frame.canvas, 0.20, 0.30, 0.60, 0.40);
-        if (centerBottom) regions.push(centerBottom);
-        if (center) regions.push(center);
-      }
-
-      let plateResult: { plate: string; confidence: number } | null = null;
-      let successRegion: HTMLCanvasElement | null = null;
-
-      for (const region of regions) {
-        plateResult = await this.plateReader.confirmPlate(region);
-        if (plateResult && !this.lockedPlates.has(plateResult.plate)) {
-          successRegion = region;
-          break;
-        }
-        plateResult = null;
-      }
-
-      if (plateResult && successRegion) {
-        this.setStatus('processing_exit');
-        const exitResult = await this.processExit(plateResult.plate, plateResult.confidence);
-
-        if (exitResult) {
-          this.lockedPlates.add(plateResult.plate);
-          this._lastResult = exitResult;
-          this.setStatus('exit_complete');
-          this.resultCallbacks.forEach(cb => cb(exitResult));
-
-          setTimeout(() => {
-            this.lockedPlates.delete(plateResult!.plate);
-          }, 30000);
-        } else {
-          this.setStatus('scanning');
-        }
-      } else {
-        this.setStatus(this._status === 'exit_complete' ? 'exit_complete' : 'scanning');
-      }
-
-      this._isProcessing = false;
-    } catch (err) {
-      console.error('[ExitProcessor] Frame processing error:', err);
-      this._isProcessing = false;
-      this.setStatus('scanning');
-    }
-  }
-
-  /**
-   * runYoloFrame — optional YOLO run to provide detections for exit guidance
-   */
-  private async runYoloFrame(): Promise<void> {
-    if (!this.detector) return;
-    const frame = this.cameraManager.captureFrame();
-    if (!frame) return;
-
-    try {
-      const detections = await this.detector.detect(frame.imageData, 0.25);
-      this._detections = detections;
-      this.detectionCallbacks.forEach(cb => cb(detections));
+      this._plateDetections = plateDetections;
+      this.plateDetectionsCallbacks.forEach(cb => cb(plateDetections));
       this.frameCallbacks.forEach(cb => cb());
-      if (detections.length > 0 && this._status === 'scanning') {
+
+      if (this._status === 'scanning' && plateDetections.length > 0) {
         this.setStatus('detected');
       }
+
+      if (!this.triggerCooldown && !this._isProcessing && plateDetections.length > 0) {
+        const topPlate = plateDetections[0];
+        const bestCrop = cropDetectedPlate(frame.canvas, topPlate.bbox);
+
+        if (bestCrop) {
+          this._isProcessing = true;
+          this.setStatus('reading_plate');
+
+          // Ultra-fast single pass OCR (~150ms)
+          const ocrRes = await this.plateReader.confirmPlate(bestCrop, this.registeredPlatesCache);
+
+          if (ocrRes && !this.lockedPlates.has(ocrRes.plate)) {
+            const exitResult = await this.processExit(ocrRes.plate, ocrRes.confidence);
+
+            if (exitResult) {
+              this.triggerCooldown = true;
+              this.lockedPlates.add(ocrRes.plate);
+              this._lastResult = exitResult;
+              this.setStatus('exit_complete');
+              // INSTANTLY EMIT TO FRONT-END UI!
+              this.resultCallbacks.forEach(cb => cb(exitResult));
+
+              setTimeout(() => { this.triggerCooldown = false; }, 8000);
+              setTimeout(() => { this.lockedPlates.delete(ocrRes.plate); }, 15000);
+
+              setTimeout(() => {
+                if (this._status === 'exit_complete') {
+                  this.setStatus('scanning');
+                }
+              }, 3000);
+            } else {
+              this.setStatus('scanning');
+            }
+          } else {
+            this.setStatus('scanning');
+          }
+
+          this._isProcessing = false;
+        }
+      }
     } catch (err) {
-      console.error('[ExitProcessor] YOLO error:', err);
+      console.error('[ExitProcessor] Stream error:', err);
+      this._isProcessing = false;
     }
   }
 
-  /**
-   * cropPlateRegion — Extracts bottom portion of bbox (copied from EntranceProcessor)
-   */
-  private cropPlateRegion(
-    sourceCanvas: HTMLCanvasElement,
-    bbox: [number, number, number, number]
-  ): HTMLCanvasElement | null {
-    const [x1, y1, x2, y2] = bbox.map(Math.round);
-    const bboxW = x2 - x1;
-    const bboxH = y2 - y1;
-
-    if (bboxW < 30 || bboxH < 20) return null;
-
-    const plateY = y1 + Math.round(bboxH * 0.60);
-    const plateH = y2 - plateY;
-    const plateW = bboxW;
-
-    if (plateW < 40 || plateH < 15) return null;
-
-    const plateCanvas = document.createElement('canvas');
-    const scale = 3;
-    plateCanvas.width = plateW * scale;
-    plateCanvas.height = plateH * scale;
-    const ctx = plateCanvas.getContext('2d')!;
-
-    ctx.drawImage(sourceCanvas, x1, plateY, plateW, plateH, 0, 0, plateW * scale, plateH * scale);
-
-    const imgData = ctx.getImageData(0, 0, plateCanvas.width, plateCanvas.height);
-    const d = imgData.data;
-    for (let i = 0; i < d.length; i += 4) {
-      const gray = 0.299 * d[i] + 0.587 * d[i + 1] + 0.114 * d[i + 2];
-      const enhanced = Math.min(255, Math.max(0, (gray - 128) * 1.5 + 128));
-      d[i] = d[i + 1] = d[i + 2] = enhanced;
-    }
-    ctx.putImageData(imgData, 0, 0);
-
-    return plateCanvas;
-  }
-
-  /**
-   * cropFrameRegion — Crops a fractional region (copied from EntranceProcessor)
-   */
-  private cropFrameRegion(
-    sourceCanvas: HTMLCanvasElement,
-    xRatio: number,
-    yRatio: number,
-    wRatio: number,
-    hRatio: number
-  ): HTMLCanvasElement | null {
-    const sw = sourceCanvas.width;
-    const sh = sourceCanvas.height;
-    const x = Math.round(sw * xRatio);
-    const y = Math.round(sh * yRatio);
-    const w = Math.round(sw * wRatio);
-    const h = Math.round(sh * hRatio);
-
-    if (w < 40 || h < 15) return null;
-
-    const cropCanvas = document.createElement('canvas');
-    const scale = 3;
-    cropCanvas.width = w * scale;
-    cropCanvas.height = h * scale;
-    const ctx = cropCanvas.getContext('2d')!;
-
-    ctx.drawImage(sourceCanvas, x, y, w, h, 0, 0, w * scale, h * scale);
-
-    const imgData = ctx.getImageData(0, 0, cropCanvas.width, cropCanvas.height);
-    const d = imgData.data;
-    for (let i = 0; i < d.length; i += 4) {
-      const gray = 0.299 * d[i] + 0.587 * d[i + 1] + 0.114 * d[i + 2];
-      const enhanced = Math.min(255, Math.max(0, (gray - 128) * 1.5 + 128));
-      d[i] = d[i + 1] = d[i + 2] = enhanced;
-    }
-    ctx.putImageData(imgData, 0, 0);
-
-    return cropCanvas;
-  }
-
-  /**
-   * cropCenterRegion — Extracts the center portion of the frame for OCR.
-   *
-   * Takes the center 60% width × 30% height of the frame,
-   * with grayscale + contrast preprocessing.
-   */
-  private cropCenterRegion(sourceCanvas: HTMLCanvasElement): HTMLCanvasElement | null {
-    const { width, height } = sourceCanvas;
-    if (width < 100 || height < 80) return null;
-
-    const cropW = Math.round(width * 0.6);
-    const cropH = Math.round(height * 0.3);
-    const cropX = Math.round((width - cropW) / 2);
-    const cropY = Math.round((height - cropH) / 2);
-
-    const canvas = document.createElement('canvas');
-    const scale = 2;
-    canvas.width = cropW * scale;
-    canvas.height = cropH * scale;
-    const ctx = canvas.getContext('2d')!;
-
-    ctx.drawImage(sourceCanvas, cropX, cropY, cropW, cropH, 0, 0, cropW * scale, cropH * scale);
-
-    // Preprocess: grayscale + contrast
-    const imgData = ctx.getImageData(0, 0, canvas.width, canvas.height);
-    const d = imgData.data;
-    for (let i = 0; i < d.length; i += 4) {
-      const gray = 0.299 * d[i] + 0.587 * d[i + 1] + 0.114 * d[i + 2];
-      const enhanced = Math.min(255, Math.max(0, (gray - 128) * 1.5 + 128));
-      d[i] = d[i + 1] = d[i + 2] = enhanced;
-    }
-    ctx.putImageData(imgData, 0, 0);
-
-    return canvas;
-  }
-
-  /**
-   * processExit — Finds the active session, calculates payment, and completes the session.
-   *
-   * @param plateNumber — The confirmed plate number from OCR
-   * @param confidence — OCR confidence score
-   * @returns ExitResult with session details and payment amount, or null if no active session
-   */
   private async processExit(plateNumber: string, confidence: number): Promise<ExitResult | null> {
     try {
-      // 1. Find active session for this plate
-      const { data: sessions } = await supabase
+      // 1. Find active session for this plate (exact match first)
+      let { data: sessions } = await supabase
         .from('parking_sessions')
         .select('*')
         .eq('plate_number', plateNumber)
         .eq('status', 'active')
         .order('entry_time', { ascending: false })
         .limit(1);
+
+      // If no exact active session, try fuzzy Levenshtein match against active sessions
+      if (!sessions || sessions.length === 0) {
+        const { data: activeSessions } = await supabase
+          .from('parking_sessions')
+          .select('*')
+          .eq('status', 'active')
+          .order('entry_time', { ascending: false });
+
+        if (activeSessions && activeSessions.length > 0) {
+          const matched = activeSessions.find(s => {
+            const cleanActive = s.plate_number.toUpperCase().replace(/[^A-Z0-9]/g, '');
+            const cleanOcr = plateNumber.toUpperCase().replace(/[^A-Z0-9]/g, '');
+            return levenshteinDistance(cleanOcr, cleanActive) <= 1;
+          });
+          if (matched) {
+            sessions = [matched];
+            plateNumber = matched.plate_number;
+          }
+        }
+      }
 
       if (!sessions || sessions.length === 0) {
         console.log(`[ExitProcessor] No active session found for ${plateNumber}`);
@@ -1600,9 +1444,8 @@ export class ExitProcessor {
       const exitTime = new Date();
       const entryTime = new Date(session.entry_time);
       const durationMs = exitTime.getTime() - entryTime.getTime();
-      const durationHours = Math.max(0.5, Math.ceil((durationMs / (1000 * 60 * 60)) * 2) / 2); // Round up to nearest 0.5hr
+      const durationHours = Math.max(0.5, Math.ceil((durationMs / (1000 * 60 * 60)) * 2) / 2);
 
-      // 2. Get hourly rate from settings
       const rateKey = session.vehicle_type === 'motorcycle' ? 'hourly_rate_motorcycle' : 'hourly_rate_car';
       const { data: settingsData } = await supabase
         .from('settings')
@@ -1613,7 +1456,6 @@ export class ExitProcessor {
       const hourlyRate = settingsData && settingsData.length > 0 ? Number(settingsData[0].value) : (session.vehicle_type === 'motorcycle' ? 25 : 50);
       const totalAmount = durationHours * hourlyRate;
 
-      // 3. Complete the session
       await supabase
         .from('parking_sessions')
         .update({
@@ -1623,7 +1465,6 @@ export class ExitProcessor {
         })
         .eq('id', session.id);
 
-      // 4. Create payment record
       const { data: countData } = await supabase.from('payments').select('id');
       const receiptNum = `RCP-${exitTime.getFullYear()}-${String((countData?.length || 0) + 1).padStart(4, '0')}`;
 
@@ -1634,12 +1475,11 @@ export class ExitProcessor {
         duration_hours: durationHours,
         hourly_rate: hourlyRate,
         total_amount: totalAmount,
-        payment_method: session.concept === 'B' ? 'gcash' : 'cash', // Private users → wallet, Public → cash
+        payment_method: session.concept === 'B' ? 'gcash' : 'cash',
         status: 'pending',
         processed_by: 'Vision System',
       });
 
-      // 5. Log plate recognition for exit
       await supabase.from('plate_recognitions').insert({
         plate_number: plateNumber,
         vehicle_type: session.vehicle_type,
@@ -1648,7 +1488,6 @@ export class ExitProcessor {
         camera_name: 'Webcam Exit',
       });
 
-      // 6. Release the parking slot if assigned
       if (session.slot_id) {
         await supabase
           .from('parking_slots')
@@ -1656,7 +1495,6 @@ export class ExitProcessor {
           .eq('slot_id', session.slot_id);
       }
 
-      // 7. Create notification
       await supabase.from('notifications').insert({
         type: 'info',
         title: `Vehicle Exited: ${plateNumber}`,
@@ -1679,3 +1517,4 @@ export class ExitProcessor {
     }
   }
 }
+

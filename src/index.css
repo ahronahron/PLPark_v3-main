@@ -1279,6 +1279,23 @@ a { color: inherit; text-decoration: none; }
 }
 .status-confirmed .camera-status-dot { background: #22c55e; }
 
+.status-captured {
+  background: rgba(16, 185, 129, 0.35);
+  color: #6ee7b7;
+  border: 1px solid rgba(52, 211, 153, 0.6);
+  box-shadow: 0 0 12px rgba(16, 185, 129, 0.4);
+  animation: captured-pulse 0.8s ease-in-out infinite alternate;
+}
+.status-captured .camera-status-dot {
+  background: #10b981;
+  animation: pulse-dot 0.3s ease-in-out infinite;
+}
+
+@keyframes captured-pulse {
+  from { box-shadow: 0 0 6px rgba(16, 185, 129, 0.3); }
+  to { box-shadow: 0 0 16px rgba(16, 185, 129, 0.8); }
+}
+
 .status-error {
   background: rgba(220, 38, 38, 0.3);
   color: #fca5a5;

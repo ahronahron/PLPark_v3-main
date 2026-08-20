@@ -84,16 +84,37 @@ export function Dashboard({ searchQuery = '' }: { searchQuery?: string }) {
   const [recognitionsExpanded, setRecognitionsExpanded] = useState(false);
 
   // ============================================================
+  // VISION PIPELINE CALLBACKS
+  // ============================================================
+
+  /** Refresh recognitions and sessions from DB after a vision event */
+  const refreshAfterDetection = useCallback(() => {
+    supabase.from('plate_recognitions').select('*').order('created_at', { ascending: false }).limit(12).then(({ data }) => setRecognitions(data || []));
+    supabase.from('parking_sessions').select('*').order('created_at', { ascending: false }).then(({ data }) => setSessions(data || []));
+    supabase.from('parking_slots').select('*').order('slot_id').then(({ data }) => setSlots(data || []));
+  }, []);
+
+  /** Called when entrance vision pipeline confirms a vehicle */
+  const handleEntranceResult = useCallback((result: EntranceResult) => {
+    console.log('[Dashboard] Entrance result:', result.plateNumber);
+    refreshAfterDetection();
+  }, [refreshAfterDetection]);
+
+  /** Called when exit vision pipeline completes a session */
+  const handleExitResult = useCallback((result: ExitResult) => {
+    console.log('[Dashboard] Exit result:', result.plateNumber, '₱' + result.totalAmount);
+    refreshAfterDetection();
+  }, [refreshAfterDetection]);
+
+  // ============================================================
   // SIDE-EFFECTS & PERSISTENCE
   // ============================================================
 
-  /** Fetch initial database records and configuration settings */
+  /** Fetch initial database records and subscribe to realtime updates */
   useEffect(() => {
-    supabase.from('parking_slots').select('*').order('slot_id').then(({ data }) => setSlots(data || []));
-    supabase.from('cameras').select('*').order('name').then(({ data }) => setCameras(data || []));
-    supabase.from('plate_recognitions').select('*').order('created_at', { ascending: false }).limit(12).then(({ data }) => setRecognitions(data || []));
-    supabase.from('parking_sessions').select('*').order('created_at', { ascending: false }).then(({ data }) => setSessions(data || []));
+    refreshAfterDetection();
 
+    supabase.from('cameras').select('*').order('name').then(({ data }) => setCameras(data || []));
     supabase.from('settings').select('key, value').then(({ data }) => {
       if (data) {
         const m = Object.fromEntries(data.map((r: any) => [r.key, r.value]));
@@ -101,7 +122,21 @@ export function Dashboard({ searchQuery = '' }: { searchQuery?: string }) {
         setMaxMotos(m.max_capacity_motorcycles || 20);
       }
     });
-  }, []);
+
+    const channel = supabase
+      .channel('dashboard-realtime')
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'plate_recognitions' }, () => {
+        refreshAfterDetection();
+      })
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'parking_sessions' }, () => {
+        refreshAfterDetection();
+      })
+      .subscribe();
+
+    return () => {
+      supabase.removeChannel(channel);
+    };
+  }, [refreshAfterDetection]);
 
   /** Save Manual Entry Form drafts to localStorage on change */
   useEffect(() => {
@@ -130,29 +165,6 @@ export function Dashboard({ searchQuery = '' }: { searchQuery?: string }) {
   const visibleRecognitions = recognitions.filter(recognition => !searchQuery || [recognition.plate_number, recognition.camera_name, recognition.direction, recognition.vehicle_type].some(value => value?.toLowerCase().includes(searchQuery.toLowerCase())));
   const matchingExitSessions = activeSessions.filter(session => session.plate_number.toLowerCase().includes(manualForm.plate.toLowerCase()));
   const matchingPaymentSessions = activeSessions.filter(session => session.plate_number.toLowerCase().includes(paymentForm.plate.toLowerCase()));
-
-  // ============================================================
-  // VISION PIPELINE CALLBACKS
-  // ============================================================
-
-  /** Refresh recognitions and sessions from DB after a vision event */
-  const refreshAfterDetection = useCallback(() => {
-    supabase.from('plate_recognitions').select('*').order('created_at', { ascending: false }).limit(12).then(({ data }) => setRecognitions(data || []));
-    supabase.from('parking_sessions').select('*').order('created_at', { ascending: false }).then(({ data }) => setSessions(data || []));
-    supabase.from('parking_slots').select('*').order('slot_id').then(({ data }) => setSlots(data || []));
-  }, []);
-
-  /** Called when entrance vision pipeline confirms a vehicle */
-  const handleEntranceResult = useCallback((result: EntranceResult) => {
-    console.log('[Dashboard] Entrance result:', result.plateNumber);
-    refreshAfterDetection();
-  }, [refreshAfterDetection]);
-
-  /** Called when exit vision pipeline completes a session */
-  const handleExitResult = useCallback((result: ExitResult) => {
-    console.log('[Dashboard] Exit result:', result.plateNumber, '₱' + result.totalAmount);
-    refreshAfterDetection();
-  }, [refreshAfterDetection]);
 
   // ============================================================
   // MUTATION WORKFLOWS

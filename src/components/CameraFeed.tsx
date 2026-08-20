@@ -19,6 +19,7 @@ import {
   ExitProcessor,
   type CameraDevice,
   type Detection,
+  type PlateDetection,
   type PipelineStatus,
   type EntranceResult,
   type ExitResult,
@@ -58,6 +59,7 @@ export function CameraFeed({ mode, onEntranceResult, onExitResult, deviceId }: C
   const [isInitialized, setIsInitialized] = useState(false);
   const [initProgress, setInitProgress] = useState('');
   const [detections, setDetections] = useState<Detection[]>([]);
+  const [plateDetections, setPlateDetections] = useState<PlateDetection[]>([]);
   const [lastPlate, setLastPlate] = useState<string>('');
   const [lastColor, setLastColor] = useState<string>('');
   const [lastType, setLastType] = useState<string>('');
@@ -102,6 +104,7 @@ export function CameraFeed({ mode, onEntranceResult, onExitResult, deviceId }: C
     const scaleX = rect.width / (video.videoWidth || 1);
     const scaleY = rect.height / (video.videoHeight || 1);
 
+    // 1. Draw Vehicle Bounding Boxes
     for (const det of detections) {
       const [x1, y1, x2, y2] = det.bbox;
       const dx = x1 * scaleX;
@@ -170,12 +173,34 @@ export function CameraFeed({ mode, onEntranceResult, onExitResult, deviceId }: C
         ctx.fillText(colorLabel, dx + 5, dy + dh + 14);
       }
     }
-  }, [detections]);
+
+    // 2. Draw License Plate Bounding Boxes (Neon Green)
+    for (const pDet of plateDetections) {
+      const [px1, py1, px2, py2] = pDet.bbox;
+      const pdx = px1 * scaleX;
+      const pdy = py1 * scaleY;
+      const pdw = (px2 - px1) * scaleX;
+      const pdh = (py2 - py1) * scaleY;
+
+      ctx.strokeStyle = '#22c55e';
+      ctx.lineWidth = 2.5;
+      ctx.setLineDash([4, 2]);
+      ctx.strokeRect(pdx, pdy, pdw, pdh);
+
+      const pLabel = `PLATE ${(pDet.confidence * 100).toFixed(0)}%`;
+      ctx.font = 'bold 11px Inter, sans-serif';
+      const pTextW = ctx.measureText(pLabel).width;
+      ctx.fillStyle = 'rgba(34, 197, 94, 0.9)';
+      ctx.fillRect(pdx, pdy - 18, pTextW + 8, 18);
+      ctx.fillStyle = '#000000';
+      ctx.fillText(pLabel, pdx + 4, pdy - 5);
+    }
+  }, [detections, plateDetections]);
 
   /** Redraw overlay whenever detections change */
   useEffect(() => {
     drawOverlay();
-  }, [detections, drawOverlay]);
+  }, [detections, plateDetections, drawOverlay]);
 
   // ============================================================
   // PIPELINE CONTROLS
@@ -195,6 +220,7 @@ export function CameraFeed({ mode, onEntranceResult, onExitResult, deviceId }: C
 
         processor.onStatusChange((s) => setStatus(s));
         processor.onDetections((d) => setDetections(d));
+        processor.onPlateDetections((pd) => setPlateDetections(pd));
         processor.onResult((result) => {
           setLastPlate(result.plateNumber);
           setLastColor(result.color);
@@ -210,15 +236,14 @@ export function CameraFeed({ mode, onEntranceResult, onExitResult, deviceId }: C
 
         entranceProcessorRef.current = processor;
       } else {
-        // Exit mode — OCR only, no YOLO
+        // Exit mode
         setInitProgress('Loading OCR engine...');
         const processor = new ExitProcessor();
 
         processor.onStatusChange((s) => setStatus(s));
-        // Subscribe to detections/frame so overlay works for exit as well
-        // (ExitProcessor now provides YOLO guidance)
-        (processor as any).onDetections?.((d: any) => setDetections(d));
-        (processor as any).onFrame?.(() => drawOverlay());
+        processor.onDetections((d) => setDetections(d));
+        processor.onPlateDetections((pd) => setPlateDetections(pd));
+        processor.onFrame(() => drawOverlay());
         processor.onResult((result) => {
           setLastExitInfo({
             plate: result.plateNumber,
@@ -261,6 +286,7 @@ export function CameraFeed({ mode, onEntranceResult, onExitResult, deviceId }: C
     setIsRunning(false);
     setIsInitialized(false);
     setDetections([]);
+    setPlateDetections([]);
     setStatus('idle');
 
     // Clear canvas
@@ -289,6 +315,7 @@ export function CameraFeed({ mode, onEntranceResult, onExitResult, deviceId }: C
     scanning: { label: 'Scanning', className: 'status-scanning' },
     detected: { label: 'Vehicle Detected', className: 'status-detected' },
     reading_plate: { label: 'Reading Plate...', className: 'status-reading' },
+    captured: { label: '⚡ Snapshot Captured! Vehicle May Proceed', className: 'status-captured' },
     confirmed: { label: 'Plate Confirmed!', className: 'status-confirmed' },
     processing_exit: { label: 'Processing Exit...', className: 'status-reading' },
     exit_complete: { label: 'Exit Complete!', className: 'status-confirmed' },
@@ -329,12 +356,12 @@ export function CameraFeed({ mode, onEntranceResult, onExitResult, deviceId }: C
         </div>
 
         {/* Confirmed Plate (bottom overlay) */}
-        {lastPlate && mode === 'entrance' && (
+        {lastPlate && (
           <div className="camera-plate-result">
             <div className="camera-plate-number">{lastPlate}</div>
             <div className="camera-plate-details">
-              <span className="camera-plate-type">{lastType}</span>
-              <span className="camera-plate-color">{lastColor}</span>
+              {lastType && <span className="camera-plate-type">{lastType}</span>}
+              {lastColor && <span className="camera-plate-color">{lastColor}</span>}
             </div>
           </div>
         )}
