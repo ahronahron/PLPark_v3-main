@@ -56,6 +56,7 @@ const MODEL_HEIGHT = 640;
 
 /** Supabase Storage bucket name for snapshots */
 const STORAGE_BUCKET = 'vehicle-snapshots';
+const EASY_OCR_URL = import.meta.env.VITE_EASYOCR_URL || '';
 
 // ============================================================
 // TYPES
@@ -168,8 +169,8 @@ export class CameraManager {
 
     const constraints: MediaStreamConstraints = {
       video: deviceId
-        ? { deviceId: { exact: deviceId }, width: { ideal: 1280 }, height: { ideal: 720 } }
-        : { width: { ideal: 1280 }, height: { ideal: 720 } },
+        ? { deviceId: { exact: deviceId }, facingMode: { ideal: 'environment' }, width: { ideal: 1920 }, height: { ideal: 1080 } }
+        : { facingMode: { ideal: 'environment' }, width: { ideal: 1920 }, height: { ideal: 1080 } },
     };
 
     this.stream = await navigator.mediaDevices.getUserMedia(constraints);
@@ -177,6 +178,12 @@ export class CameraManager {
     videoEl.muted = true;
     await videoEl.play();
     this.videoElement = videoEl;
+    const track = this.stream.getVideoTracks()[0];
+    const capabilities = track?.getCapabilities() as MediaTrackCapabilities & { focusMode?: string[]; exposureMode?: string[] };
+    const advanced: MediaTrackConstraintSet & { focusMode?: string; exposureMode?: string } = {};
+    if (capabilities?.focusMode?.includes('continuous')) advanced.focusMode = 'continuous';
+    if (capabilities?.exposureMode?.includes('continuous')) advanced.exposureMode = 'continuous';
+    if (Object.keys(advanced).length > 0) await track.applyConstraints({ advanced: [advanced] });
   }
 
   /**
@@ -697,7 +704,7 @@ function cropDetectedPlate(sourceCanvas: HTMLCanvasElement, bbox: [number, numbe
   const height = y2 - y1;
   if (width < 25 || height < 10) return null;
   const canvas = document.createElement('canvas');
-  const scale = 2.5;
+  const scale = 4;
   canvas.width = Math.round(width * scale);
   canvas.height = Math.round(height * scale);
   const context = canvas.getContext('2d');
@@ -708,13 +715,36 @@ function cropDetectedPlate(sourceCanvas: HTMLCanvasElement, bbox: [number, numbe
   const image = context.getImageData(0, 0, canvas.width, canvas.height);
   for (let i = 0; i < image.data.length; i += 4) {
     const gray = 0.299 * image.data[i] + 0.587 * image.data[i + 1] + 0.114 * image.data[i + 2];
-    const enhanced = Math.max(0, Math.min(255, (gray - 128) * 1.6 + 128));
+    const enhanced = Math.max(0, Math.min(255, (gray - 128) * 1.8 + 128));
     image.data[i] = enhanced;
     image.data[i + 1] = enhanced;
     image.data[i + 2] = enhanced;
   }
   context.putImageData(image, 0, 0);
   return canvas;
+}
+
+function createOcrVariants(source: HTMLCanvasElement): HTMLCanvasElement[] {
+  const variants = [source];
+  const thresholdCanvas = document.createElement('canvas');
+  thresholdCanvas.width = source.width;
+  thresholdCanvas.height = source.height;
+  const context = thresholdCanvas.getContext('2d');
+  if (!context) return variants;
+  context.drawImage(source, 0, 0);
+  const image = context.getImageData(0, 0, thresholdCanvas.width, thresholdCanvas.height);
+  let total = 0;
+  for (let i = 0; i < image.data.length; i += 4) total += image.data[i];
+  const threshold = total / (image.data.length / 4);
+  for (let i = 0; i < image.data.length; i += 4) {
+    const value = image.data[i] >= threshold ? 255 : 0;
+    image.data[i] = value;
+    image.data[i + 1] = value;
+    image.data[i + 2] = value;
+  }
+  context.putImageData(image, 0, 0);
+  variants.push(thresholdCanvas);
+  return variants;
 }
 
 
@@ -856,13 +886,77 @@ export class PlateReader {
   ): Promise<{ plate: string; confidence: number } | null> {
     if (!this.worker) return null;
 
-    const result = await this.worker.recognize(imageSource);
-    const { plate, confidenceBoost } = cleanAndFormatPlate(result.data.text, registeredPlates);
-    const rawConf = Number(result.data.confidence || 0);
-    const confidence = Math.min(99, Math.round(rawConf + confidenceBoost));
+    if (EASY_OCR_URL && typeof imageSource !== 'string') {
+      try {
+        const easyResult = await this.confirmWithEasyOcr(imageSource, registeredPlates);
+        if (easyResult) return easyResult;
+      } catch (error) {
+        console.warn('[PlateReader] EasyOCR service unavailable; using browser OCR fallback.', error);
+      }
+    }
+
+    const variants = typeof imageSource === 'string' ? [imageSource] : createOcrVariants(imageSource);
+    const firstResult = await this.worker.recognize(variants[0]);
+    const first = cleanAndFormatPlate(firstResult.data.text, registeredPlates);
+    const firstConfidence = Number(firstResult.data.confidence || 0) + first.confidenceBoost;
+    let selected = first;
+    let confidence = firstConfidence;
+
+    // Only run the thresholded fallback for uncertain frames to keep normal reads fast.
+    if (firstConfidence < 78 && variants[1]) {
+      await this.worker.setParameters({ tessedit_pageseg_mode: Tesseract.PSM.SINGLE_WORD });
+      const secondResult = await this.worker.recognize(variants[1]);
+      await this.worker.setParameters({ tessedit_pageseg_mode: Tesseract.PSM.SINGLE_LINE });
+      const second = cleanAndFormatPlate(secondResult.data.text, registeredPlates);
+      const secondConfidence = Number(secondResult.data.confidence || 0) + second.confidenceBoost;
+      selected = secondConfidence > firstConfidence ? second : first;
+      confidence = Math.max(firstConfidence, secondConfidence);
+    }
+    confidence = Math.min(99, Math.round(confidence));
+    const plate = selected.plate;
 
     if (plate.length < 3 || plate.length > 9) return null;
     return { plate, confidence: Math.max(40, confidence) };
+  }
+
+  private async confirmWithEasyOcr(
+    imageSource: HTMLCanvasElement,
+    registeredPlates: string[]
+  ): Promise<{ plate: string; confidence: number } | null> {
+    const image = imageSource.toDataURL('image/jpeg', 0.85);
+    const response = await fetch(`${EASY_OCR_URL.replace(/\/$/, '')}/read-plate`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ image, registered_plates: registeredPlates }),
+    });
+    if (!response.ok) return null;
+    const result = await response.json() as { plate?: string; confidence?: number };
+    if (!result.plate || result.plate.length < 3) return null;
+    return { plate: result.plate, confidence: Math.max(40, Math.min(99, Math.round(result.confidence || 0))) };
+  }
+
+  async confirmPlateAcrossFrames(
+    getImage: () => HTMLCanvasElement | null,
+    registeredPlates: string[] = [],
+    sampleCount = EASY_OCR_URL ? 1 : 3
+  ): Promise<{ plate: string; confidence: number } | null> {
+    const results: { plate: string; confidence: number }[] = [];
+    for (let sample = 0; sample < sampleCount; sample++) {
+      const image = getImage();
+      if (!image) continue;
+      const result = await this.confirmPlate(image, registeredPlates);
+      if (result) results.push(result);
+      if (sample < sampleCount - 1) await new Promise(resolve => setTimeout(resolve, 40));
+    }
+    if (!results.length) return null;
+    const counts = new Map<string, { count: number; confidence: number }>();
+    results.forEach(result => {
+      const current = counts.get(result.plate) || { count: 0, confidence: 0 };
+      counts.set(result.plate, { count: current.count + 1, confidence: current.confidence + result.confidence });
+    });
+    const winner = [...counts.entries()].sort((a, b) => b[1].count - a[1].count || b[1].confidence - a[1].confidence)[0];
+    if (!winner || (winner[1].count < 2 && results.length > 1)) return null;
+    return { plate: winner[0], confidence: Math.round(winner[1].confidence / winner[1].count) };
   }
 
   async dispose(): Promise<void> {
@@ -1044,8 +1138,13 @@ export class EntranceProcessor {
           this._isProcessingSnapshot = true;
           this.setStatus('reading_plate');
 
-          // Ultra-fast single pass OCR (~150ms)
-          const ocrRes = await this.plateReader.confirmPlate(bestCrop, this.registeredPlatesCache);
+          const ocrRes = await this.plateReader.confirmPlateAcrossFrames(
+            () => {
+              const nextFrame = this.cameraManager.captureFrame();
+              return nextFrame && topPlate ? cropDetectedPlate(nextFrame.canvas, topPlate.bbox) : bestCrop;
+            },
+            this.registeredPlatesCache,
+          );
 
           if (ocrRes && !this.lockedPlates.has(ocrRes.plate)) {
             const plateNumber = ocrRes.plate;
@@ -1365,8 +1464,13 @@ export class ExitProcessor {
           this._isProcessing = true;
           this.setStatus('reading_plate');
 
-          // Ultra-fast single pass OCR (~150ms)
-          const ocrRes = await this.plateReader.confirmPlate(bestCrop, this.registeredPlatesCache);
+          const ocrRes = await this.plateReader.confirmPlateAcrossFrames(
+            () => {
+              const nextFrame = this.cameraManager.captureFrame();
+              return nextFrame ? cropDetectedPlate(nextFrame.canvas, topPlate.bbox) : bestCrop;
+            },
+            this.registeredPlatesCache,
+          );
 
           if (ocrRes && !this.lockedPlates.has(ocrRes.plate)) {
             const exitResult = await this.processExit(ocrRes.plate, ocrRes.confidence);

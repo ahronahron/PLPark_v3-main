@@ -14,6 +14,7 @@
  */
 import { useEffect, useState, useCallback } from 'react';
 import {
+  logActivity,
   supabase,
   type ParkingSlot,
   type Camera,
@@ -243,6 +244,7 @@ export function Dashboard() {
       title: `Manual Entry: ${formattedPlate}`,
       message: `Vehicle (${manualForm.type}) logged manually at ${new Date(time).toLocaleTimeString()}.`,
     });
+    await logActivity('Recorded manual entry', 'Parking Sessions', { plate_number: formattedPlate, vehicle_type: manualForm.type, entry_time: time });
 
     setEntryStatus({ msg: `Vehicle ${formattedPlate} logged successfully ✓`, ok: true });
     refreshData();
@@ -282,6 +284,8 @@ export function Dashboard() {
         setIsProcessingPayment(false);
         return;
       }
+
+      await logActivity('Recorded manual payment', 'Payments', { plate_number: selectedExitSession.plate_number, amount: totalAmount, payment_method: exitPaymentMethod, receipt_number: receiptNum });
 
       setExitStatus({ msg: `Payment recorded (₱${totalAmount.toFixed(2)}) — Receipt: ${receiptNum} ✓`, ok: true });
       refreshData();

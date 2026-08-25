@@ -16,7 +16,7 @@
  * - Removed User Permissions / RBAC selector.
  */
 import { useEffect, useState } from 'react';
-import { supabase } from '@/lib/supabase';
+import { logActivity, supabase } from '@/lib/supabase';
 import {
   IconCameraConfig, IconRates, IconBackup,
   IconNotifications, IconLogs, IconSearch, IconDownload,
@@ -50,18 +50,19 @@ export function Settings() {
   const [settings, setSettings] = useState<Record<string, any>>({});
   const [cameras, setCameras] = useState<any[]>([]);
   const [devices, setDevices] = useState<MediaDeviceInfo[]>([]);
-  const [newCamera, setNewCamera] = useState({ name: '', location: '', type: 'entrance', slot_range: '', device_id: '' });
+  const [newCamera, setNewCamera] = useState({ name: '', location: '', type: 'entrance', slot_range: '', device_id: '', connection_method: 'device', ip_address: '' });
   const [cameraEdits, setCameraEdits] = useState<Record<string, any>>({});
   const [logs, setLogs] = useState<any[]>([]);
   const [logSearch, setLogSearch] = useState('');
   const [saveMsg, setSaveMsg] = useState('');
+  const [selectedLog, setSelectedLog] = useState<any | null>(null);
 
   /** Fetch configuration and cameras from Supabase on mount */
   useEffect(() => {
     supabase.from('settings').select('key, value').then(({ data }) => {
       if (data) setSettings(Object.fromEntries(data.map((r: any) => [r.key, r.value])));
     });
-    supabase.from('cameras').select('id, name, type, location, is_online, slot_range, device_id, created_at').order('name').then(({ data, error }) => {
+    supabase.from('cameras').select('id, name, type, location, is_online, slot_range, device_id, ip_address, connection_method, created_at').order('name').then(({ data, error }) => {
       if (!error) {
         setCameras(data || []);
         return;
@@ -83,7 +84,12 @@ export function Settings() {
    * @param value — Settings record payload value
    */
   const saveSetting = async (key: string, value: any) => {
-    await supabase.from('settings').upsert({ key, value });
+    const { error } = await supabase.from('settings').upsert({ key, value });
+    if (error) {
+      setSaveMsg('Unable to save setting: ' + error.message);
+      return;
+    }
+    await logActivity('Updated system setting', 'System Settings', { key, value });
     setSettings(prev => ({ ...prev, [key]: value }));
     setSaveMsg(`Setting saved successfully.`);
     setTimeout(() => setSaveMsg(''), 2000);
@@ -120,6 +126,7 @@ export function Settings() {
     }
 
     setCameras(prev => prev.map((c: any) => c.id === camera.id ? { ...c, ...changes } : c));
+    await logActivity('Updated camera', 'Camera & Vision', { camera_id: camera.id, changes });
     setCameraEdits(prev => ({ ...prev, [String(camera.id)]: {} }));
     setSaveMsg('Camera updated successfully.');
     setTimeout(() => setSaveMsg(''), 2000);
@@ -128,6 +135,14 @@ export function Settings() {
   const handleAddCamera = async () => {
     if (!newCamera.name || !newCamera.location) {
       setSaveMsg('Camera name and location are required.');
+      return;
+    }
+    if (newCamera.connection_method === 'ip' && !newCamera.ip_address.trim()) {
+      setSaveMsg('Enter an IP address for this camera.');
+      return;
+    }
+    if (newCamera.connection_method === 'device' && !newCamera.device_id) {
+      setSaveMsg('Select a device for this camera.');
       return;
     }
 
@@ -150,7 +165,8 @@ export function Settings() {
         }
       }
       setCameras(prev => [...prev, addedCamera]);
-      setNewCamera({ name: '', location: '', type: 'entrance', slot_range: '', device_id: '' });
+      await logActivity('Added camera', 'Camera & Vision', { name: addedCamera.name, type: addedCamera.type, location: addedCamera.location });
+      setNewCamera({ name: '', location: '', type: 'entrance', slot_range: '', device_id: '', connection_method: 'device', ip_address: '' });
       setSaveMsg('Camera added successfully.');
       setTimeout(() => setSaveMsg(''), 2000);
     }
@@ -164,6 +180,7 @@ export function Settings() {
       return;
     }
     setCameras(prev => prev.filter(item => item.id !== camera.id));
+    await logActivity('Removed camera', 'Camera & Vision', { camera_id: camera.id, name: camera.name });
     setSaveMsg('Camera removed.');
     setTimeout(() => setSaveMsg(''), 2000);
   };
@@ -213,7 +230,7 @@ export function Settings() {
               <div className="camera-top-grid">
                 <div className="camera-add-card">
                   <h3 style={{ fontSize: '13px', fontWeight: 600, marginBottom: '12px' }}>Add Camera</h3>
-                  <div className="settings-form full-width">
+                  <div className="settings-form camera-add-form">
                     <div className="form-group">
                       <label>Camera Name</label>
                       <input value={newCamera.name} onChange={e => setNewCamera(prev => ({ ...prev, name: e.target.value }))} placeholder="Entrance Camera 01" />
@@ -236,11 +253,25 @@ export function Settings() {
                     </div>
                     <div className="form-group">
                       <label>Device</label>
+                      <select value={newCamera.connection_method} onChange={e => setNewCamera(prev => ({ ...prev, connection_method: e.target.value }))}>
+                        <option value="device">Local device</option>
+                        <option value="ip">IP camera</option>
+                      </select>
+                    </div>
+                    {newCamera.connection_method === 'ip' ? (
+                      <div className="form-group">
+                        <label>IP Address</label>
+                        <input value={newCamera.ip_address} onChange={e => setNewCamera(prev => ({ ...prev, ip_address: e.target.value }))} placeholder="192.168.1.100" />
+                      </div>
+                    ) : (
+                      <div className="form-group">
+                        <label>Device</label>
                       <select value={newCamera.device_id} onChange={e => setNewCamera(prev => ({ ...prev, device_id: e.target.value }))}>
                         <option value="">Default device</option>
                         {devices.map(device => <option key={device.deviceId} value={device.deviceId}>{device.label || 'Camera device'}</option>)}
                       </select>
-                    </div>
+                      </div>
+                    )}
                     <button className="btn-primary" style={{ width: 'fit-content' }} onClick={handleAddCamera}>Add Camera</button>
                   </div>
                 </div>
@@ -248,13 +279,13 @@ export function Settings() {
                 <div className="camera-params-card">
                   <h3 style={{ fontSize: '13px', fontWeight: 600, marginBottom: '12px' }}>Plate Recognition Parameters</h3>
                   <div className="settings-form">
-                    <div className="form-group">
+                    <div className="form-group vision-param">
                       <label>Confidence Threshold (%)</label>
                       <input type="number" defaultValue={settings.plate_recognition_confidence_threshold || 85}
                         onBlur={e => saveSetting('plate_recognition_confidence_threshold', parseInt(e.target.value))} />
                       <span className="form-hint">Plates below this confidence are flagged for review.</span>
                     </div>
-                    <div className="form-group">
+                    <div className="form-group vision-param">
                       <label>Camera FPS</label>
                       <input type="number" defaultValue={settings.camera_fps || 30}
                         onBlur={e => saveSetting('camera_fps', parseInt(e.target.value))} />
@@ -446,8 +477,8 @@ export function Settings() {
             <table className="data-table">
               <thead><tr><th>User</th><th>Action</th><th>Module</th><th>Details</th><th>Timestamp</th></tr></thead>
               <tbody>
-                {filteredLogs.map(l => (
-                  <tr key={l.id}>
+                  {filteredLogs.map(l => (
+                  <tr key={l.id} className="logs-interactive-row" onClick={() => setSelectedLog(l)}>
                     <td>{l.user_name}</td>
                     <td>{l.action}</td>
                     <td>{l.module}</td>
@@ -461,6 +492,20 @@ export function Settings() {
           </div>
         )}
       </div>
+      {selectedLog && (
+        <div className="modal-overlay" onClick={() => setSelectedLog(null)}>
+          <div className="modal-container notification-detail-modal" onClick={e => e.stopPropagation()}>
+            <div className="modal-header"><h3>Activity Log Details</h3><button className="close-btn" onClick={() => setSelectedLog(null)}>×</button></div>
+            <div className="modal-body activity-log-detail">
+              <div><span className="cell-label">User</span><strong>{selectedLog.user_name || 'Admin'}</strong></div>
+              <div><span className="cell-label">Action</span><strong>{selectedLog.action}</strong></div>
+              <div><span className="cell-label">Module</span><strong>{selectedLog.module}</strong></div>
+              <div><span className="cell-label">Timestamp</span><strong>{new Date(selectedLog.created_at).toLocaleString()}</strong></div>
+              <div><span className="cell-label">Details</span><pre>{selectedLog.details || 'No additional details.'}</pre></div>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

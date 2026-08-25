@@ -39,6 +39,16 @@ const supabaseAnonKey = import.meta.env.VITE_SUPABASE_ANON_KEY;
  */
 export const supabase = createClient(supabaseUrl, supabaseAnonKey);
 
+export async function logActivity(action: string, module: string, details: Record<string, unknown> | string) {
+  const payload = typeof details === 'string' ? details : JSON.stringify(details);
+  await supabase.from('activity_logs').insert({
+    user_name: 'Admin',
+    action,
+    module,
+    details: payload,
+  });
+}
+
 // ============================================================
 // TYPE DEFINITIONS — String literal unions for database enums
 // ============================================================

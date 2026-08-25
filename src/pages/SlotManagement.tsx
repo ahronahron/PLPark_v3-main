@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState, type Dispatch, type SetStateAction } from 'react';
-import { supabase, type Camera, type ParkingSlot, type SlotStatus } from '@/lib/supabase';
+import { logActivity, supabase, type Camera, type ParkingSlot, type SlotStatus } from '@/lib/supabase';
 import { IconBan, IconCamera, IconCar, IconCheck, IconEdit, IconLock, IconMotorcycle, IconPlus, IconTrash } from '@/components/Icons';
 import {
   CameraManager,
@@ -113,12 +113,14 @@ export function SlotManagement() {
     const { error } = await supabase.from('parking_slots').update(updates).eq('id', slotId);
     setSaveStatus({ slotId, msg: error ? 'Save failed' : 'AOI saved ✓', ok: !error });
     if (!error) setSlots(prev => prev.map(slot => slot.id === slotId ? { ...slot, ...updates } : slot));
+    if (!error) await logActivity('Saved slot AOI', 'Slot Management', { slot_id: slotId, camera_id: activeCamera?.id || null });
     setTimeout(() => setSaveStatus(null), 2500);
   };
 
   const clearAOI = async (slotId: string) => {
     setAoiMap(prev => { const next = { ...prev }; delete next[slotId]; return next; });
     await supabase.from('parking_slots').update({ aoi_polygon: null, aoi_color: null }).eq('id', slotId);
+    await logActivity('Cleared slot AOI', 'Slot Management', { slot_id: slotId });
     setSlots(prev => prev.map(slot => slot.id === slotId ? { ...slot, aoi_polygon: null, aoi_color: null } : slot));
     setSaveStatus({ slotId, msg: 'AOI cleared', ok: true });
     setTimeout(() => setSaveStatus(null), 2000);
@@ -151,6 +153,7 @@ export function SlotManagement() {
     }
     if (data) {
       setSlots(prev => [...prev, data as ParkingSlot].sort((a, b) => a.slot_id.localeCompare(b.slot_id)));
+      await logActivity('Added parking slot', 'Slot Management', { slot_id: slotName, vehicle_type: vehicleType });
       setSaveStatus({ slotId: '', msg: `Slot ${slotName} added ✓`, ok: true });
       setTimeout(() => setSaveStatus(null), 2000);
     }
@@ -165,6 +168,7 @@ export function SlotManagement() {
     const { error } = await supabase.from('parking_slots').delete().eq('id', id);
     if (!error) {
       setSlots(prev => prev.filter(s => s.id !== id));
+      await logActivity('Deleted parking slot', 'Slot Management', { slot_id: slot.slot_id });
       setAoiMap(prev => { const next = { ...prev }; delete next[id]; return next; });
       if (editingSlotId === id) setEditingSlotId(null);
     }

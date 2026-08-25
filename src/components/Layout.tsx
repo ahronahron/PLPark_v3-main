@@ -62,13 +62,6 @@ export function Sidebar({
             <div className="sidebar-subtitle">Admin Console</div>
           </div>
         )}
-        <button
-          className="sidebar-collapse-btn"
-          onClick={onToggleCollapse}
-          title={isCollapsed ? 'Expand sidebar' : 'Collapse sidebar'}
-        >
-          {isCollapsed ? <IconChevronRight size={14} /> : <IconChevronLeft size={14} />}
-        </button>
       </div>
 
       {/* Navigation items */}
@@ -88,6 +81,13 @@ export function Sidebar({
 
       {/* Footer section with Settings access */}
       <div className="sidebar-bottom">
+        <button
+          className="sidebar-collapse-btn"
+          onClick={onToggleCollapse}
+          title={isCollapsed ? 'Expand sidebar' : 'Collapse sidebar'}
+        >
+          {isCollapsed ? <IconChevronRight size={14} /> : <IconChevronLeft size={14} />}
+        </button>
         <button
           className="sidebar-footer-btn"
           onClick={onOpenSettings}
@@ -116,9 +116,12 @@ interface TopbarProps {
  */
 export function Topbar({ title, notifications, onMarkAllRead, onSignOut }: TopbarProps) {
   const [isProfileOpen, setIsProfileOpen] = useState(false);
+  const [isNotificationsOpen, setIsNotificationsOpen] = useState(false);
+  const [selectedNotification, setSelectedNotification] = useState<TopbarProps['notifications'][number] | null>(null);
 
   useEffect(() => {
     setIsProfileOpen(false);
+    setIsNotificationsOpen(false);
   }, [title]);
 
   const unreadCount = notifications.filter(n => !n.is_read).length;
@@ -130,8 +133,8 @@ export function Topbar({ title, notifications, onMarkAllRead, onSignOut }: Topba
 
       <div className="topbar-right">
         {/* Notification bell with unread count and dropdown */}
-        <div className="topbar-notifications">
-          <button className="icon-btn notif-btn" title="Notifications">
+        <div className={`topbar-notifications ${isNotificationsOpen ? 'open' : ''}`}>
+          <button className="icon-btn notif-btn" title="Notifications" onClick={() => setIsNotificationsOpen(prev => !prev)}>
             {unreadCount > 0 && (
               <span className="notif-count">{unreadCount}</span>
             )}
@@ -147,13 +150,13 @@ export function Topbar({ title, notifications, onMarkAllRead, onSignOut }: Topba
             <div className="notif-list">
               {notifications.length === 0 && <div className="notif-empty">No notifications</div>}
               {notifications.slice(0, 8).map(n => (
-                <div key={n.id} className={`notif-item ${n.is_read ? 'read' : 'unread'}`}>
+                <button key={n.id} className={`notif-item ${n.is_read ? 'read' : 'unread'}`} onClick={() => setSelectedNotification(n)}>
                   <span className={`notif-dot notif-${n.type}`} />
                   <div>
                     <div className="notif-item-title">{n.title}</div>
                     <div className="notif-item-msg">{n.message}</div>
                   </div>
-                </div>
+                </button>
               ))}
             </div>
           </div>
@@ -177,6 +180,26 @@ export function Topbar({ title, notifications, onMarkAllRead, onSignOut }: Topba
           )}
         </div>
       </div>
+      {selectedNotification && (
+        <div className="modal-overlay notification-detail-overlay" onClick={() => setSelectedNotification(null)}>
+          <div className="modal-container notification-detail-modal" onClick={e => e.stopPropagation()}>
+            <div className="modal-header">
+              <div className="quick-look-title-bar">
+                <span className={`notif-dot notif-${selectedNotification.type}`} />
+                <h3>{selectedNotification.title}</h3>
+              </div>
+              <button className="close-btn" onClick={() => setSelectedNotification(null)} title="Close notification">×</button>
+            </div>
+            <div className="modal-body notification-detail-body">
+              <p>{selectedNotification.message || 'No additional details were provided.'}</p>
+              <span className="text-muted text-xs">{new Date(selectedNotification.created_at).toLocaleString()}</span>
+              <div className="clean-modal-actions">
+                <button className="btn-secondary" onClick={() => setSelectedNotification(null)}>Close</button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
     </header>
   );
 }

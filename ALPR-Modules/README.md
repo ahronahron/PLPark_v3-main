@@ -53,3 +53,13 @@ python add_missing_data.py
 ```python
 python visualize.py
 ```
+
+## Browser EasyOCR test mode
+
+The React dashboard can use the local EasyOCR service for plate reads. Install the existing Python requirements, start the service, and set `VITE_EASYOCR_URL=http://127.0.0.1:8765` in the app environment before starting Vite:
+
+```bash
+python easyocr_service.py
+```
+
+The service reads one detected plate crop per event. If it is unavailable, the browser automatically falls back to Tesseract.

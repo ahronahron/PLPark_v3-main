@@ -12,7 +12,8 @@ import {
   type User,
   type Payment,
   type ParkingSession,
-  type PaymentMethod
+  type PaymentMethod,
+  logActivity
 } from '@/lib/supabase';
 import {
   IconSearch,
@@ -67,19 +68,25 @@ export function Logs() {
   /** Deletions */
   const deleteSession = async (id: string) => {
     if (!confirm('Are you sure you want to delete this vehicle session?')) return;
-    await supabase.from('parking_sessions').delete().eq('id', id);
+    const { error } = await supabase.from('parking_sessions').delete().eq('id', id);
+    if (error) return;
+    await logActivity('Deleted vehicle session', 'Logs & Management', { session_id: id });
     setSessions(prev => prev.filter(s => s.id !== id));
   };
 
   const deletePayment = async (id: string) => {
     if (!confirm('Are you sure you want to delete this payment record?')) return;
-    await supabase.from('payments').delete().eq('id', id);
+    const { error } = await supabase.from('payments').delete().eq('id', id);
+    if (error) return;
+    await logActivity('Deleted payment record', 'Logs & Management', { payment_id: id });
     setPayments(prev => prev.filter(p => p.id !== id));
   };
 
   const deleteUser = async (id: string) => {
     if (!confirm('Are you sure you want to delete this user?')) return;
-    await supabase.from('users').delete().eq('id', id);
+    const { error } = await supabase.from('users').delete().eq('id', id);
+    if (error) return;
+    await logActivity('Deleted user', 'User Management', { user_id: id });
     setUsers(prev => prev.filter(u => u.id !== id));
   };
 
@@ -158,6 +165,13 @@ export function Logs() {
         return;
       }
 
+      await logActivity('Recorded manual payment', 'Payments', {
+        plate_number: manageExitSession.plate_number,
+        amount: totalAmount,
+        payment_method: exitPaymentMethod,
+        receipt_number: receiptNum,
+      });
+
       setExitStatusMsg({ msg: `Payment recorded (₱${totalAmount.toFixed(2)}) — Receipt: ${receiptNum} ✓`, ok: true });
       loadData();
     } catch (err: any) {
@@ -194,6 +208,12 @@ export function Logs() {
       confidence: 100,
       camera_name: 'Manual Exit',
       created_at: exitTime,
+    });
+
+    await logActivity('Completed manual exit', 'Parking Sessions', {
+      plate_number: session.plate_number,
+      slot_id: session.slot_id,
+      exit_time: exitTime,
     });
 
     loadData();
