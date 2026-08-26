@@ -8,6 +8,10 @@ export default defineConfig({
   resolve: {
     tsconfigPaths: true,
   },
+  server: {
+    host: true,
+    allowedHosts: true,
+  },
   optimizeDeps: {
     exclude: ['lucide-react'],
   },
