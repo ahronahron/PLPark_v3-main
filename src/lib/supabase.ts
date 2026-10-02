@@ -91,6 +91,7 @@ export type UserRole = 'admin' | 'operator' | 'viewer';
  */
 export interface User {
   id: string;
+  user_id: string | null;
   full_name: string;
   username: string;
   role: UserRole;

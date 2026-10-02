@@ -2348,3 +2348,56 @@ a { color: inherit; text-decoration: none; }
 @keyframes spin {
   to { transform: rotate(360deg); }
 }
+
+/* ===== ADMIN LOGIN ===== */
+.login-page {
+  min-height: 100vh;
+  display: grid;
+  place-items: center;
+  padding: 24px;
+  background: var(--cursor-bg);
+}
+.login-card {
+  width: 100%;
+  max-width: 400px;
+  background: var(--cursor-bg-secondary);
+  border: 1px solid var(--cursor-border);
+  border-radius: 12px;
+  padding: 28px 24px;
+  box-shadow: 0 10px 30px rgba(15, 23, 42, 0.08);
+}
+.login-brand {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 20px;
+  padding-bottom: 16px;
+  border-bottom: 1px solid var(--cursor-border);
+}
+.login-heading {
+  font-size: 18px;
+  font-weight: 700;
+  color: var(--cursor-text);
+  letter-spacing: -0.01em;
+}
+.login-copy {
+  margin-top: 4px;
+  margin-bottom: 20px;
+  font-size: 13px;
+  color: var(--cursor-text-muted);
+}
+.login-form {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+.login-error { margin-top: 0; }
+.login-submit {
+  width: 100%;
+  justify-content: center;
+  padding: 10px 16px;
+}
+.login-submit:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
