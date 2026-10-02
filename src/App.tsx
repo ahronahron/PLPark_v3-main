@@ -137,7 +137,7 @@ function App() {
   const [authReady, setAuthReady] = useState(false);
 
   useEffect(() => {
-    const userAgent = navigator.userAgent || navigator.vendor || (window as unknown as { opera?: string }).opera;
+    const userAgent = navigator.userAgent || navigator.vendor || (window as unknown as { opera?: string }).opera || '';
     const isMobile = /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(userAgent);
     if (isMobile) {
       setView('mobile');
