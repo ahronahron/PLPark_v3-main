@@ -495,7 +495,7 @@ The app will start at **http://localhost:5173** (default Vite port).
 
 | Variable | Required | Description |
 |----------|----------|-------------|
-| `VITE_SUPABASE_URL` | ✅ | Your Supabase project URL (e.g., `https://xjqfzllvskndhpxwukhp.supabase.co`) |
+| `VITE_SUPABASE_URL` | ✅ | Your Supabase project URL (e.g., `https://your-project-id.supabase.co`) |
 | `VITE_SUPABASE_ANON_KEY` | ✅ | Your Supabase anon/public API key |
 
 > ⚠️ **Security Note:** The `.env.local` file is listed in `.gitignore` and should **never** be committed. The anon key is safe to use client-side as it is scoped by RLS policies.
@@ -551,7 +551,6 @@ After running migrations, verify in **Table Editor** that these 11 tables exist:
 |------------|-------|
 | **Admin Email** | `admin@parking.local` |
 | **Admin Password** | `StrongP@ssw0rd!` |
-| **Database Password** | `QI3GoA17TEFmwtpL` |
 | **Admin Username** (app table) | `admin` |
 | **Admin Role** | `admin` |
 
