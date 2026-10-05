@@ -25,3 +25,6 @@ dist-ssr
 !.env.example
 .env.local
 .env.*.local
+
+
+**/debug_crops/
