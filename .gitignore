@@ -21,3 +21,12 @@ dist-ssr
 *.sln
 *.sw?
 .env
+.env.*
+!.env.example
+.env.local
+.env.*.local
+
+
+**/debug_crops/
+
+supabase/.temp/

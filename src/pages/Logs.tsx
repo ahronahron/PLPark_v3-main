@@ -52,6 +52,12 @@ export function Logs() {
   const [exitStatusMsg, setExitStatusMsg] = useState<{ msg: string; ok: boolean } | null>(null);
   const [isProcessingPayment, setIsProcessingPayment] = useState(false);
 
+  /** Add User Modal State */
+  const [isAddUserModalOpen, setIsAddUserModalOpen] = useState(false);
+  const [addUserForm, setAddUserForm] = useState({ full_name: '', username: '', email: '', password: '', role: 'admin' });
+  const [isAddingUser, setIsAddingUser] = useState(false);
+  const [addUserError, setAddUserError] = useState('');
+
   /** Load data based on active tab */
   const loadData = () => {
     supabase.from('parking_sessions').select('*').order('created_at', { ascending: false }).then(({ data }) => setSessions(data || []));
@@ -88,6 +94,45 @@ export function Logs() {
     if (error) return;
     await logActivity('Deleted user', 'User Management', { user_id: id });
     setUsers(prev => prev.filter(u => u.id !== id));
+  };
+
+  const handleAddUser = async () => {
+    setAddUserError('');
+    if (!addUserForm.full_name || !addUserForm.username || !addUserForm.email || !addUserForm.password) {
+      setAddUserError('All fields are required.');
+      return;
+    }
+    const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+    if (!emailRegex.test(addUserForm.email)) {
+      setAddUserError('Please enter a valid email address.');
+      return;
+    }
+    if (addUserForm.password.length < 8) {
+      setAddUserError('Password must be at least 8 characters.');
+      return;
+    }
+
+    setIsAddingUser(true);
+    try {
+      const { data, error } = await supabase.functions.invoke('create-admin', {
+        body: addUserForm,
+      });
+
+      if (error) throw new Error(error.message);
+      if (data?.error) throw new Error(data.error);
+
+      // Success
+      setIsAddUserModalOpen(false);
+      setAddUserForm({ full_name: '', username: '', email: '', password: '', role: 'admin' });
+      await logActivity('Added new user', 'User Management', { username: addUserForm.username });
+      
+      // Reload users
+      supabase.from('users').select('*').order('created_at', { ascending: false }).then(({ data }) => setUsers(data || []));
+    } catch (err: any) {
+      setAddUserError(err.message || 'Failed to add user');
+    } finally {
+      setIsAddingUser(false);
+    }
   };
 
   // ============================================================
@@ -425,7 +470,7 @@ export function Logs() {
           />
         </div>
         <div className="toolbar-actions">
-          <button className="btn-primary" onClick={() => alert('Add User functionality')}>
+          <button className="btn-primary" onClick={() => setIsAddUserModalOpen(true)}>
             <IconPlus size={15} /> Add User
           </button>
         </div>
@@ -765,6 +810,53 @@ export function Logs() {
             <div className="confirm-modal-actions">
               <button className="btn-secondary" onClick={() => setExitConfirmSession(null)}>Cancel</button>
               <button className="btn-danger-action" onClick={handleConfirmExit}>Confirm Exit</button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ===== 5. ADD USER MODAL ===== */}
+      {isAddUserModalOpen && (
+        <div className="modal-overlay" onClick={() => setIsAddUserModalOpen(false)}>
+          <div className="modal-container" onClick={e => e.stopPropagation()} style={{ maxWidth: '400px' }}>
+            <div className="modal-header">
+              <h3>Add New User</h3>
+              <button className="close-btn" onClick={() => setIsAddUserModalOpen(false)}>×</button>
+            </div>
+            <div className="modal-body">
+              <div className="form-group">
+                <label>Full Name</label>
+                <input value={addUserForm.full_name} onChange={e => setAddUserForm({ ...addUserForm, full_name: e.target.value })} placeholder="John Doe" />
+              </div>
+              <div className="form-group">
+                <label>Username</label>
+                <input value={addUserForm.username} onChange={e => setAddUserForm({ ...addUserForm, username: e.target.value })} placeholder="johndoe" />
+              </div>
+              <div className="form-group">
+                <label>Email</label>
+                <input type="email" value={addUserForm.email} onChange={e => setAddUserForm({ ...addUserForm, email: e.target.value })} placeholder="john@example.com" />
+              </div>
+              <div className="form-group">
+                <label>Password</label>
+                <input type="password" value={addUserForm.password} onChange={e => setAddUserForm({ ...addUserForm, password: e.target.value })} placeholder="Min 8 characters" />
+              </div>
+              <div className="form-group">
+                <label>Role</label>
+                <select value={addUserForm.role} onChange={e => setAddUserForm({ ...addUserForm, role: e.target.value })}>
+                  <option value="admin">Admin</option>
+                  <option value="operator">Operator</option>
+                  <option value="viewer">Viewer</option>
+                </select>
+              </div>
+              
+              {addUserError && <div className="save-status error">{addUserError}</div>}
+              
+              <div className="form-actions" style={{ marginTop: '1.5rem', display: 'flex', justifyContent: 'flex-end', gap: '0.5rem' }}>
+                <button className="btn-secondary" onClick={() => setIsAddUserModalOpen(false)} disabled={isAddingUser}>Cancel</button>
+                <button className="btn-primary" onClick={handleAddUser} disabled={isAddingUser}>
+                  {isAddingUser ? 'Adding...' : 'Add User'}
+                </button>
+              </div>
             </div>
           </div>
         </div>

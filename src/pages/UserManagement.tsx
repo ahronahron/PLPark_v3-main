@@ -32,12 +32,22 @@ export function UserManagement() {
   /** Current search query for filtering the user table */
   const [search, setSearch] = useState('');
 
+  // Add User Modal State
+  const [isAddModalOpen, setIsAddModalOpen] = useState(false);
+  const [addForm, setAddForm] = useState({ full_name: '', username: '', email: '', password: '', role: 'admin' });
+  const [isAdding, setIsAdding] = useState(false);
+  const [addError, setAddError] = useState('');
+
+  const fetchUsers = () => {
+    supabase.from('users').select('*').order('created_at', { ascending: false }).then(({ data }) => setUsers(data || []));
+  };
+
   /**
    * Initial data fetch — loads all users on component mount.
    * Results are ordered by creation date (newest first).
    */
   useEffect(() => {
-    supabase.from('users').select('*').order('created_at', { ascending: false }).then(({ data }) => setUsers(data || []));
+    fetchUsers();
   }, []);
 
   /**
@@ -71,6 +81,42 @@ export function UserManagement() {
     setUsers(prev => prev.filter(u => u.id !== id));
   };
 
+  const handleAddUser = async () => {
+    setAddError('');
+    if (!addForm.full_name || !addForm.username || !addForm.email || !addForm.password) {
+      setAddError('All fields are required.');
+      return;
+    }
+    const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+    if (!emailRegex.test(addForm.email)) {
+      setAddError('Please enter a valid email address.');
+      return;
+    }
+    if (addForm.password.length < 8) {
+      setAddError('Password must be at least 8 characters.');
+      return;
+    }
+
+    setIsAdding(true);
+    try {
+      const { data, error } = await supabase.functions.invoke('create-admin', {
+        body: addForm,
+      });
+
+      if (error) throw new Error(error.message);
+      if (data?.error) throw new Error(data.error);
+
+      // Success
+      setIsAddModalOpen(false);
+      setAddForm({ full_name: '', username: '', email: '', password: '', role: 'admin' });
+      fetchUsers();
+    } catch (err: any) {
+      setAddError(err.message || 'Failed to add user');
+    } finally {
+      setIsAdding(false);
+    }
+  };
+
   // ============================================================
   // RENDER
   // ============================================================
@@ -85,7 +131,7 @@ export function UserManagement() {
         </div>
         {/* Action buttons */}
         <div className="toolbar-actions">
-          <button className="btn-primary"><IconPlus size={15} /> Add User</button>
+          <button className="btn-primary" onClick={() => setIsAddModalOpen(true)}><IconPlus size={15} /> Add User</button>
           <button className="btn-secondary"><IconDownload size={15} /> Export</button>
         </div>
       </div>
@@ -130,6 +176,52 @@ export function UserManagement() {
           {filtered.length === 0 && <tr><td colSpan={7} className="empty-state">No users found</td></tr>}
         </tbody>
       </table>
+
+      {isAddModalOpen && (
+        <div className="modal-overlay" onClick={() => setIsAddModalOpen(false)}>
+          <div className="modal-container" onClick={e => e.stopPropagation()} style={{ maxWidth: '400px' }}>
+            <div className="modal-header">
+              <h3>Add New User</h3>
+              <button className="close-btn" onClick={() => setIsAddModalOpen(false)}>×</button>
+            </div>
+            <div className="modal-body">
+              <div className="form-group">
+                <label>Full Name</label>
+                <input value={addForm.full_name} onChange={e => setAddForm({ ...addForm, full_name: e.target.value })} placeholder="John Doe" />
+              </div>
+              <div className="form-group">
+                <label>Username</label>
+                <input value={addForm.username} onChange={e => setAddForm({ ...addForm, username: e.target.value })} placeholder="johndoe" />
+              </div>
+              <div className="form-group">
+                <label>Email</label>
+                <input type="email" value={addForm.email} onChange={e => setAddForm({ ...addForm, email: e.target.value })} placeholder="john@example.com" />
+              </div>
+              <div className="form-group">
+                <label>Password</label>
+                <input type="password" value={addForm.password} onChange={e => setAddForm({ ...addForm, password: e.target.value })} placeholder="Min 8 characters" />
+              </div>
+              <div className="form-group">
+                <label>Role</label>
+                <select value={addForm.role} onChange={e => setAddForm({ ...addForm, role: e.target.value })}>
+                  <option value="admin">Admin</option>
+                  <option value="operator">Operator</option>
+                  <option value="viewer">Viewer</option>
+                </select>
+              </div>
+              
+              {addError && <div className="save-status error">{addError}</div>}
+              
+              <div className="form-actions" style={{ marginTop: '1.5rem', display: 'flex', justifyContent: 'flex-end', gap: '0.5rem' }}>
+                <button className="btn-secondary" onClick={() => setIsAddModalOpen(false)} disabled={isAdding}>Cancel</button>
+                <button className="btn-primary" onClick={handleAddUser} disabled={isAdding}>
+                  {isAdding ? 'Adding...' : 'Add User'}
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

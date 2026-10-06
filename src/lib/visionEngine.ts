@@ -694,8 +694,8 @@ class PlateDetector {
 /** Crop and normalize an exact plate detector box for OCR. */
 function cropDetectedPlate(sourceCanvas: HTMLCanvasElement, bbox: [number, number, number, number]): HTMLCanvasElement | null {
   const [rawX1, rawY1, rawX2, rawY2] = bbox.map(Math.round);
-  const paddingX = Math.round((rawX2 - rawX1) * 0.08);
-  const paddingY = Math.round((rawY2 - rawY1) * 0.15);
+  const paddingX = Math.round((rawX2 - rawX1) * 0.18);
+  const paddingY = Math.round((rawY2 - rawY1) * 0.25);
   const x1 = Math.max(0, rawX1 - paddingX);
   const y1 = Math.max(0, rawY1 - paddingY);
   const x2 = Math.min(sourceCanvas.width, rawX2 + paddingX);
@@ -924,11 +924,13 @@ export class PlateReader {
     registeredPlates: string[]
   ): Promise<{ plate: string; confidence: number } | null> {
     const image = imageSource.toDataURL('image/jpeg', 0.85);
+    console.time("[Timing] EasyOCR fetch");
     const response = await fetch(`${EASY_OCR_URL.replace(/\/$/, '')}/read-plate`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ image, registered_plates: registeredPlates }),
     });
+    console.timeEnd("[Timing] EasyOCR fetch");
     if (!response.ok) return null;
     const result = await response.json() as { plate?: string; confidence?: number };
     if (!result.plate || result.plate.length < 3) return null;
@@ -938,14 +940,19 @@ export class PlateReader {
   async confirmPlateAcrossFrames(
     getImage: () => HTMLCanvasElement | null,
     registeredPlates: string[] = [],
-    sampleCount = EASY_OCR_URL ? 1 : 3
+    sampleCount = EASY_OCR_URL ? 2 : 3
   ): Promise<{ plate: string; confidence: number } | null> {
     const results: { plate: string; confidence: number }[] = [];
     for (let sample = 0; sample < sampleCount; sample++) {
       const image = getImage();
       if (!image) continue;
       const result = await this.confirmPlate(image, registeredPlates);
-      if (result) results.push(result);
+      if (result) {
+        results.push(result);
+        if (EASY_OCR_URL && sample === 0 && result.confidence >= 85) {
+          return result;
+        }
+      }
       if (sample < sampleCount - 1) await new Promise(resolve => setTimeout(resolve, 40));
     }
     if (!results.length) return null;
@@ -1098,19 +1105,25 @@ export class EntranceProcessor {
    * Immediately confirms & emits recognized plate text to UI in real-time.
    */
   private async runStreamFrame(): Promise<void> {
+    if (this.triggerCooldown || this._isProcessingSnapshot) return;
+
     const frame = this.cameraManager.captureFrame();
     if (!frame) return;
 
     try {
+      console.time("[Timing] Vehicle detect");
       // 1. Run YOLO Vehicle Detection
       const vehicleDetections = await this.detector.detect(frame.imageData, 0.25);
+      console.timeEnd("[Timing] Vehicle detect");
       this._detections = vehicleDetections;
 
+      console.time("[Timing] Plate detect");
       // 2. Run Dedicated Plate Detector
       let plateDetections: PlateDetection[] = [];
       if (this.plateDetector.isLoaded) {
         plateDetections = await this.plateDetector.detect(frame.imageData, 0.25);
       }
+      console.timeEnd("[Timing] Plate detect");
       this._plateDetections = plateDetections;
 
       // Notify UI for immediate overlay drawing
@@ -1123,7 +1136,7 @@ export class EntranceProcessor {
       }
 
       // 3. REAL-TIME INSTANT STREAM SCANNING:
-      if (!this.triggerCooldown && !this._isProcessingSnapshot && (plateDetections.length > 0 || vehicleDetections.length > 0)) {
+      if (plateDetections.length > 0 || vehicleDetections.length > 0) {
         const topPlate = plateDetections[0];
         const topVehicle = vehicleDetections[0];
 
@@ -1135,9 +1148,11 @@ export class EntranceProcessor {
         }
 
         if (bestCrop) {
+          console.log(`[Timing] bestCrop dimensions: ${bestCrop.width}x${bestCrop.height}`);
           this._isProcessingSnapshot = true;
           this.setStatus('reading_plate');
 
+          console.time("[Timing] OCR confirm total");
           const ocrRes = await this.plateReader.confirmPlateAcrossFrames(
             () => {
               const nextFrame = this.cameraManager.captureFrame();
@@ -1145,6 +1160,7 @@ export class EntranceProcessor {
             },
             this.registeredPlatesCache,
           );
+          console.timeEnd("[Timing] OCR confirm total");
 
           if (ocrRes && !this.lockedPlates.has(ocrRes.plate)) {
             const plateNumber = ocrRes.plate;
