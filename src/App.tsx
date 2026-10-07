@@ -18,6 +18,7 @@ import { LoginPage } from '@/pages/LoginPage';
 import { useNotifications } from '@/lib/hooks';
 import { supabase } from '@/lib/supabase';
 
+const BYPASS_ADMIN_LOGIN = false; 
 /**
  * pageTitles — Maps internal page IDs to human-readable titles
  * displayed in the Topbar header.
