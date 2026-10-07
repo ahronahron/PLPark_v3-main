@@ -4,6 +4,8 @@
  * Uses Supabase Auth (email/password). Credentials are verified
  * by GoTrue, not by reading a password column from `users`.
  */
+
+
 import { useState, type FormEvent } from 'react';
 import { supabase } from '@/lib/supabase';
 
