@@ -95,7 +95,7 @@ function AdminShell({ onSwitchToMobile }: { onSwitchToMobile: () => void }) {
  * App — Root component for PLPark.
  */
 function App() {
-  const [view, setView] = useState<'admin' | 'mobile'>('admin');
+  const [view, setView] = useState<'admin' | 'mobile'>(() => new URLSearchParams(window.location.search).get('view') === 'mobile' ? 'mobile' : 'admin');
 
   useEffect(() => {
     const userAgent = navigator.userAgent || navigator.vendor || (window as unknown as { opera?: string }).opera || '';

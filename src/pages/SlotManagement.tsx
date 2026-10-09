@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState, type Dispatch, type SetStateAction } from 'react';
 import { logActivity, supabase, type Camera, type ParkingSlot, type SlotStatus } from '@/lib/supabase';
-import { IconBan, IconCamera, IconCar, IconCheck, IconEdit, IconLock, IconMotorcycle, IconPlus, IconTrash } from '@/components/Icons';
+import { IconBan, IconCamera, IconCar, IconCheck, IconEdit, IconLock, IconMore, IconMotorcycle, IconPlus, IconTrash, IconUnlock } from '@/components/Icons';
 import {
   CameraManager,
   SlotMonitorProcessor,
@@ -20,6 +20,8 @@ interface SlotAOI {
 }
 
 const AOI_COLORS = ['#3b82f6', '#22c55e', '#f97316', '#a855f7', '#eab308', '#ef4444', '#06b6d4', '#ec4899'];
+const DEFAULT_SLOT_ACTIONS = { reservation: true, disable: true, edit: true, delete: true };
+type SlotActionSettings = typeof DEFAULT_SLOT_ACTIONS;
 
 export function SlotManagement() {
   const [slots, setSlots] = useState<ParkingSlot[]>([]);
@@ -29,9 +31,15 @@ export function SlotManagement() {
   const [aoiMap, setAoiMap] = useState<Record<string, SlotAOI>>({});
   const [saveStatus, setSaveStatus] = useState<{ slotId: string; msg: string; ok: boolean } | null>(null);
   const [isCameraOpen, setIsCameraOpen] = useState(true);
+  const [slotActions, setSlotActions] = useState<SlotActionSettings>(DEFAULT_SLOT_ACTIONS);
 
   // Load data from Supabase
   useEffect(() => {
+    supabase.from('settings').select('value').eq('key', 'slot_action_settings').maybeSingle().then(({ data }) => {
+      if (data?.value && typeof data.value === 'object') {
+        setSlotActions({ ...DEFAULT_SLOT_ACTIONS, ...data.value });
+      }
+    });
     supabase.from('parking_slots').select('*').order('slot_id').then(({ data }) => {
       const loadedSlots = (data || []) as ParkingSlot[];
       setSlots(loadedSlots);
@@ -223,6 +231,7 @@ export function SlotManagement() {
         <div className="slots-grid">
           {currentSlots.map(slot => (
             <SlotCard key={slot.id} slot={slot} aoi={aoiMap[slot.id]} isEditing={editingSlotId === slot.id}
+              enabledActions={slotActions}
               onEdit={() => startEditing(slot.id)} onUpdate={updateSlot} onDelete={() => deleteSlot(slot.id)} />
           ))}
           {currentSlots.length === 0 && (
@@ -617,30 +626,51 @@ function CameraPanel({
 /* ================================================================
    SlotCard — Individual slot card in the grid
    ================================================================ */
-function SlotCard({ slot, aoi, isEditing, onEdit, onUpdate, onDelete }: {
+function SlotCard({ slot, aoi, isEditing, enabledActions, onEdit, onUpdate, onDelete }: {
   slot: ParkingSlot; aoi?: SlotAOI; isEditing: boolean;
+  enabledActions: SlotActionSettings;
   onEdit: () => void; onUpdate: (id: string, updates: Partial<ParkingSlot>) => void;
   onDelete: () => void;
 }) {
+  const [menuOpen, setMenuOpen] = useState(false);
+
   return (
     <div className={`slot-card slot-${slot.status} ${isEditing ? 'slot-editing' : ''}`}>
       <div className="slot-card-header">
         <span className="slot-id">{slot.slot_id}</span>
-        <span className="slot-type-icon">{slot.vehicle_type === 'car' ? <IconCar size={18} /> : <IconMotorcycle size={18} />}</span>
+        <div className="slot-card-header-actions">
+          <span className="slot-type-icon">{slot.vehicle_type === 'car' ? <IconCar size={18} /> : <IconMotorcycle size={18} />}</span>
+          <button
+            type="button"
+            className="slot-menu-trigger"
+            title="Slot actions"
+            aria-label={`Actions for slot ${slot.slot_id}`}
+            aria-expanded={menuOpen}
+            onClick={() => setMenuOpen(open => !open)}
+          >
+            <IconMore size={18} />
+          </button>
+          {menuOpen && (
+            <div className="slot-actions-menu">
+              {enabledActions.edit && <button className="slot-action-btn" onClick={() => { setMenuOpen(false); onEdit(); }}><IconEdit size={14} /><span>Edit AOI</span></button>}
+              {enabledActions.disable && (slot.status !== 'disabled'
+                ? <button className="slot-action-btn" onClick={() => { setMenuOpen(false); onUpdate(slot.id, { status: 'disabled' as SlotStatus }); }}><IconBan size={14} /><span>Disable</span></button>
+                : <button className="slot-action-btn" onClick={() => { setMenuOpen(false); onUpdate(slot.id, { status: 'available' as SlotStatus }); }}><IconCheck size={14} /><span>Enable</span></button>)}
+              {enabledActions.reservation && (slot.status !== 'reserved'
+                ? <button className="slot-action-btn" onClick={() => { setMenuOpen(false); onUpdate(slot.id, { status: 'reserved' as SlotStatus }); }}><IconLock size={14} /><span>Reserve</span></button>
+                : <button className="slot-action-btn" onClick={() => { setMenuOpen(false); onUpdate(slot.id, { status: 'available' as SlotStatus }); }}><IconUnlock size={14} /><span>Cancel reservation</span></button>)}
+              {enabledActions.delete && <button className="slot-action-btn slot-action-danger" onClick={() => { setMenuOpen(false); onDelete(); }}><IconTrash size={14} /><span>Delete</span></button>}
+              {!enabledActions.edit && !enabledActions.disable && !enabledActions.reservation && !enabledActions.delete && (
+                <span className="slot-actions-empty">No actions enabled</span>
+              )}
+            </div>
+          )}
+        </div>
       </div>
       <div className="slot-card-type">{slot.vehicle_type}</div>
       <div className={`slot-status-text slot-${slot.status}`}>{slot.status}</div>
       <div className="slot-aoi-indicator">
         {aoi && aoi.points.length >= 3 ? <span className="aoi-set" style={{ color: aoi.color }}>AOI: {aoi.points.length} pts</span> : <span className="aoi-unset">No AOI</span>}
-      </div>
-      <div className="slot-card-actions">
-        <button className="slot-action-btn" title="Edit AOI" onClick={onEdit}><IconEdit size={14} /><span>Edit AOI</span></button>
-        {slot.status !== 'disabled'
-          ? <button className="slot-action-btn" title="Disable" onClick={() => onUpdate(slot.id, { status: 'disabled' as SlotStatus })}><IconBan size={14} /><span>Disable</span></button>
-          : <button className="slot-action-btn" title="Enable" onClick={() => onUpdate(slot.id, { status: 'available' as SlotStatus })}><IconCheck size={14} /><span>Enable</span></button>
-        }
-        <button className="slot-action-btn" title="Reserve" onClick={() => onUpdate(slot.id, { status: 'reserved' as SlotStatus })}><IconLock size={14} /><span>Reserve</span></button>
-        <button className="slot-action-btn" title="Delete Slot" onClick={onDelete} style={{ color: 'var(--cursor-red)' }}><IconTrash size={14} /><span>Delete</span></button>
       </div>
     </div>
   );

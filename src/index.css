@@ -1090,13 +1090,20 @@ a { color: inherit; text-decoration: none; }
 .legend-dot.slot-reserved { background: var(--cursor-yellow); }
 .legend-dot.slot-disabled { background: var(--cursor-text-muted); }
 .slots-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(140px, 1fr)); gap: 12px; }
-.slot-card { background: #ffffff; border: 2px solid var(--cursor-border); border-radius: 8px; padding: 16px; transition: all 0.2s; cursor: default; box-shadow: 0 1px 3px rgba(0,0,0,0.03); }
+.slot-card { position: relative; background: #ffffff; border: 2px solid var(--cursor-border); border-radius: 8px; padding: 16px; transition: all 0.2s; cursor: default; box-shadow: 0 1px 3px rgba(0,0,0,0.03); }
 .slot-card:hover { transform: translateY(-2px); box-shadow: 0 4px 12px rgba(37,99,235,0.08); }
 .slot-card.slot-available { border-color: var(--cursor-green); background: #f0fdf4; }
 .slot-card.slot-occupied { border-color: var(--cursor-red); background: #fef2f2; }
 .slot-card.slot-reserved { border-color: var(--cursor-yellow); background: #fffbeb; }
 .slot-card.slot-disabled { border-color: var(--cursor-text-muted); background: #f8fafc; opacity: 0.6; }
 .slot-card-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px; }
+.slot-card-header-actions { display: flex; align-items: center; gap: 8px; position: relative; }
+.slot-menu-trigger { width: 30px; height: 30px; display: inline-grid; place-items: center; border: 1px solid transparent; border-radius: 6px; color: var(--cursor-text-secondary); }
+.slot-menu-trigger:hover, .slot-menu-trigger[aria-expanded="true"] { background: var(--cursor-bg-tertiary); border-color: var(--cursor-border); color: var(--cursor-text); }
+.slot-actions-menu { position: absolute; z-index: 20; top: calc(100% + 5px); right: 0; width: 170px; padding: 5px; background: #fff; border: 1px solid var(--cursor-border); border-radius: 7px; box-shadow: 0 8px 24px rgba(15, 23, 42, 0.16); }
+.slot-actions-menu .slot-action-btn { border-radius: 4px; }
+.slot-actions-menu .slot-action-danger { color: var(--cursor-red); }
+.slot-actions-empty { display: block; padding: 8px; color: var(--cursor-text-muted); font-size: 11px; }
 .slot-id { font-size: 18px; font-weight: 700; font-family: 'JetBrains Mono', monospace; color: var(--cursor-text); }
 .slot-type-icon { color: var(--cursor-text-secondary); display: flex; align-items: center; }
 .slot-card-type { font-size: 12px; color: var(--cursor-text-secondary); text-transform: capitalize; }
@@ -1105,7 +1112,6 @@ a { color: inherit; text-decoration: none; }
 .slot-status-text.slot-occupied { color: var(--cursor-red); }
 .slot-status-text.slot-reserved { color: var(--cursor-yellow); }
 .slot-status-text.slot-disabled { color: var(--cursor-text-muted); }
-.slot-card-actions { display: flex; flex-direction: column; gap: 4px; margin-top: 12px; padding-top: 12px; border-top: 1px solid var(--cursor-border); }
 .slot-action-btn { display: flex; align-items: center; gap: 6px; padding: 5px 8px; border-radius: 4px; font-size: 11px; font-weight: 500; color: var(--cursor-text-secondary); transition: all 0.15s; width: 100%; text-align: left; }
 .slot-action-btn:hover { background: var(--cursor-bg-tertiary); color: var(--cursor-blue); }
 .slot-action-btn svg { flex-shrink: 0; }
@@ -1421,6 +1427,9 @@ a { color: inherit; text-decoration: none; }
 .m-auth-title { font-size: 22px; font-weight: 700; color: #0f172a; margin-top: 16px; }
 .m-auth-sub { font-size: 13px; color: #64748b; margin-top: 6px; margin-bottom: 8px; max-width: 280px; }
 .m-form { display: flex; flex-direction: column; gap: 16px; width: 100%; margin-top: 8px; }
+.m-name-fields { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; width: 100%; }
+.m-inline-link { align-self: center; padding: 4px 8px; color: var(--cursor-blue); font-size: 13px; font-weight: 600; }
+.m-inline-link:hover { text-decoration: underline; }
 .m-field { display: flex; flex-direction: column; gap: 6px; text-align: left; }
 .m-field label { font-size: 13px; font-weight: 600; color: #475569; }
 .m-field input {
@@ -1471,6 +1480,10 @@ a { color: inherit; text-decoration: none; }
 .m-session-value { font-size: 14px; font-weight: 600; color: #0f172a; }
 .m-plate { font-family: 'JetBrains Mono', monospace; font-weight: 700; letter-spacing: 0.05em; color: var(--cursor-blue); }
 .m-session-cost { font-size: 18px; font-weight: 700; color: #16a34a; }
+.m-session-image { width: 100%; max-height: 180px; aspect-ratio: 16 / 9; object-fit: cover; border-radius: 10px; background: #e2e8f0; }
+.m-plate-photo { min-height: 132px; max-height: 220px; overflow: hidden; border-radius: 12px; background: #e2e8f0; display: grid; place-items: center; color: #64748b; }
+.m-plate-photo img { display: block; width: 100%; max-height: 220px; aspect-ratio: 16 / 9; object-fit: cover; }
+.m-plate-photo span { display: flex; align-items: center; gap: 8px; font-size: 12px; }
 
 /* No session */
 .m-no-session {
@@ -1510,6 +1523,10 @@ a { color: inherit; text-decoration: none; }
 .m-vehicle-info { flex: 1; }
 .m-vehicle-plate { font-size: 15px; font-weight: 700; color: #0f172a; font-family: 'JetBrains Mono', monospace; letter-spacing: 0.03em; }
 .m-vehicle-meta { font-size: 12px; color: #64748b; margin-top: 2px; text-transform: capitalize; }
+.m-vehicle-actions { display: flex; gap: 4px; }
+.m-vehicle-actions button { width: 36px; height: 36px; display: grid; place-items: center; border-radius: 8px; color: #475569; }
+.m-vehicle-actions button:hover { background: #eff6ff; color: var(--cursor-blue); }
+.m-vehicle-actions button:last-child:hover { background: #fef2f2; color: #dc2626; }
 
 .m-empty-mini { text-align: center; padding: 20px; background: #ffffff; border-radius: 12px; border: 1px solid #e2e8f0; }
 .m-empty-mini p { font-size: 13px; color: #64748b; margin-bottom: 10px; }
@@ -1533,11 +1550,36 @@ a { color: inherit; text-decoration: none; }
   background: #ffffff; border-radius: 12px; border: 1px solid #e2e8f0; box-shadow: 0 1px 3px rgba(0,0,0,0.03);
 }
 .m-session-list-info { flex: 1; }
+.m-history-session-image { width: 58px; height: 46px; flex: 0 0 58px; object-fit: cover; border-radius: 8px; background: #e2e8f0; }
 .m-session-list-plate { font-size: 14px; font-weight: 700; color: #0f172a; font-family: 'JetBrains Mono', monospace; }
 .m-session-list-meta { font-size: 12px; color: #64748b; margin-top: 2px; }
 .m-session-list-status { font-size: 11px; font-weight: 600; text-transform: uppercase; padding: 3px 10px; border-radius: 20px; }
 .m-status-active { background: rgba(22,163,74,0.12); color: #16a34a; }
 .m-status-completed { background: rgba(100,116,139,0.12); color: #475569; }
+
+/* Mobile slot availability and peak-hour indicators */
+.m-slot-section { display: flex; flex-direction: column; gap: 10px; }
+.m-live-indicator { display: flex; align-items: center; gap: 5px; color: #15803d; font-size: 10px; font-weight: 700; }
+.m-live-indicator span { width: 7px; height: 7px; border-radius: 50%; background: #22c55e; box-shadow: 0 0 0 3px rgba(34,197,94,0.14); }
+.m-peak-hours { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+.m-peak-label { font-size: 11px; color: #64748b; font-weight: 600; }
+.m-peak-chip { padding: 4px 8px; border-radius: 999px; background: #fff7ed; color: #c2410c; font-size: 10px; font-weight: 700; }
+.m-peak-chip.is-current, .m-peak-now { background: #ffedd5; color: #9a3412; }
+.m-peak-empty { font-size: 11px; color: #94a3b8; }
+.m-peak-now { padding: 4px 7px; border-radius: 999px; font-size: 9px; font-weight: 800; }
+.m-slot-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
+.m-slot-card { min-height: 90px; display: grid; grid-template-columns: 1fr auto; align-content: start; align-items: center; gap: 5px; padding: 11px; border: 1px solid #dbe2ea; border-left: 4px solid #94a3b8; border-radius: 10px; background: #fff; }
+.m-slot-card strong { color: #0f172a; font-size: 16px; font-family: 'JetBrains Mono', monospace; }
+.m-slot-type { color: #64748b; font-size: 10px; text-transform: capitalize; }
+.m-slot-status { justify-self: end; padding: 4px 7px; border-radius: 999px; background: #f1f5f9; color: #475569; font-size: 9px; font-weight: 700; text-transform: uppercase; }
+.m-slot-available { border-left-color: #16a34a; }
+.m-slot-available .m-slot-status { background: #dcfce7; color: #15803d; }
+.m-slot-occupied { border-left-color: #dc2626; }
+.m-slot-occupied .m-slot-status { background: #fee2e2; color: #b91c1c; }
+.m-slot-reserved { border-left-color: #d97706; }
+.m-slot-reserved .m-slot-status { background: #ffedd5; color: #c2410c; }
+.m-slot-disabled { border-left-color: #64748b; }
+.m-slot-peak-mark { grid-column: 1 / -1; color: #9a3412; font-size: 9px; font-weight: 700; }
 
 /* Pay section */
 .m-pay-section { display: flex; flex-direction: column; gap: 10px; }
@@ -1610,6 +1652,10 @@ a { color: inherit; text-decoration: none; }
 @media (max-width: 600px) {
   .mobile-shell { padding: 0; }
   .mobile-phone { border-radius: 0; border: none; height: 100vh; max-height: 100vh; width: 100%; }
+}
+
+@media (max-width: 350px) {
+  .m-name-fields { grid-template-columns: 1fr; }
 }
 
 /* ===== PROFILE DROPDOWN ===== */
@@ -1847,10 +1893,24 @@ a { color: inherit; text-decoration: none; }
   grid-template-columns: 1fr 1fr;
   gap: 20px;
 }
+.parking-handling-secondary {
+  margin-top: 20px;
+}
+.parking-rates-section {
+  grid-column: 1 / -1;
+}
+.receipt-customization-section {
+  margin-top: 20px;
+}
 .parking-handling-col {
   display: flex;
   flex-direction: column;
   gap: 16px;
+}
+.parking-rates-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 16px 20px;
 }
 .payment-gateway-panel {
   grid-column: 1 / -1;
@@ -1865,6 +1925,12 @@ a { color: inherit; text-decoration: none; }
 }
 .gateway-form { gap: 14px; }
 .gateway-form .toggle-row { justify-content: space-between; }
+
+@media (max-width: 768px) {
+  .parking-rates-grid {
+    grid-template-columns: 1fr;
+  }
+}
 
 /* Logs Page Tabs */
 .logs-tabs {

@@ -11,6 +11,7 @@
 --   5. 20260819090000_add_camera_device_id.sql
 --   6. 20260825090000_camera_connection_details.sql
 --   7. 20260922090000_admin_auth_rls.sql
+--   8. 20261009090000_mobile_account_vehicle_fields.sql
 --
 -- Original migration files were not modified.
 -- Storage recap + dashboard steps are at the bottom (section 8).
@@ -43,6 +44,7 @@ CREATE POLICY "anon_delete_users" ON users FOR DELETE TO anon, authenticated USI
 
 CREATE TABLE IF NOT EXISTS app_users (
   id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  auth_user_id uuid UNIQUE REFERENCES auth.users(id) ON DELETE SET NULL,
   full_name text NOT NULL,
   email text UNIQUE NOT NULL,
   phone text,
@@ -65,6 +67,7 @@ CREATE TABLE IF NOT EXISTS vehicles (
   app_user_id uuid REFERENCES app_users(id) ON DELETE CASCADE,
   plate_number text NOT NULL,
   vehicle_type text NOT NULL DEFAULT 'car',
+  make text,
   color text,
   image_url text,
   created_at timestamptz DEFAULT now()

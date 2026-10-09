@@ -348,60 +348,6 @@ export function Settings() {
           <div className="settings-section">
             <h2>Parking Handling</h2>
             <p className="settings-desc">Configure rates, customize receipts, and toggle payment options.</p>
-
-            <div className="parking-handling-grid">
-              {/* Column 1: Rates & Capacities */}
-              <div className="parking-handling-col">
-                <h3 style={{ fontSize: '13px', fontWeight: 600 }}>Rates & Capacity</h3>
-                <div className="settings-form" style={{ maxWidth: '100%' }}>
-                  <div className="form-group">
-                    <label>Car Hourly Rate (₱)</label>
-                    <input type="number" defaultValue={settings.hourly_rate_car || 50}
-                      onBlur={e => saveSetting('hourly_rate_car', parseInt(e.target.value))} />
-                  </div>
-                  <div className="form-group">
-                    <label>Motorcycle Hourly Rate (₱)</label>
-                    <input type="number" defaultValue={settings.hourly_rate_motorcycle || 25}
-                      onBlur={e => saveSetting('hourly_rate_motorcycle', parseInt(e.target.value))} />
-                  </div>
-                  <div className="form-group">
-                    <label>Max Capacity — Cars</label>
-                    <input type="number" defaultValue={settings.max_capacity_cars || 30}
-                      onBlur={e => saveSetting('max_capacity_cars', parseInt(e.target.value))} />
-                  </div>
-                  <div className="form-group">
-                    <label>Max Capacity — Motorcycles</label>
-                    <input type="number" defaultValue={settings.max_capacity_motorcycles || 20}
-                      onBlur={e => saveSetting('max_capacity_motorcycles', parseInt(e.target.value))} />
-                  </div>
-                </div>
-              </div>
-
-              {/* Column 2: Receipt & Gateways */}
-              <div className="parking-handling-col">
-                <div>
-                  <h3 style={{ fontSize: '13px', fontWeight: 600, marginBottom: '16px' }}>Receipt Customization</h3>
-                  <div className="settings-form" style={{ maxWidth: '100%' }}>
-                    <div className="form-group">
-                      <label>Header Text</label>
-                      <input defaultValue={settings.receipt_template?.header || 'PLPark Parking System'}
-                        onBlur={e => saveSetting('receipt_template', { ...settings.receipt_template, header: e.target.value })} />
-                    </div>
-                    <div className="form-group">
-                      <label>Address</label>
-                      <input defaultValue={settings.receipt_template?.address || 'Pasig City, Philippines'}
-                        onBlur={e => saveSetting('receipt_template', { ...settings.receipt_template, address: e.target.value })} />
-                    </div>
-                    <div className="form-group">
-                      <label>Footer Text</label>
-                      <input defaultValue={settings.receipt_template?.footer || 'Thank you for parking with us!'}
-                        onBlur={e => saveSetting('receipt_template', { ...settings.receipt_template, footer: e.target.value })} />
-                    </div>
-                  </div>
-                </div>
-
-              </div>
-            </div>
             <div className="payment-gateway-panel">
               <h3 style={{ fontSize: '13px', fontWeight: 600, marginBottom: '12px' }}>Entry Control</h3>
               <div className="settings-form gateway-form" style={{ maxWidth: '540px', margin: '0 auto' }}>
@@ -439,6 +385,83 @@ export function Settings() {
                       </label>
                     </div>
                   ))}
+                </div>
+              </div>
+            </div>
+
+            <div className="payment-gateway-panel">
+              <h3 style={{ fontSize: '13px', fontWeight: 600, marginBottom: '12px' }}>Slot Actions</h3>
+              <div className="settings-form gateway-form" style={{ maxWidth: '540px', margin: '0 auto' }}>
+                {[
+                  { key: 'reservation', label: 'Reservation' },
+                  { key: 'disable', label: 'Disable' },
+                  { key: 'edit', label: 'Edit' },
+                  { key: 'delete', label: 'Delete' },
+                ].map(action => (
+                  <div key={action.key} className="toggle-row">
+                    <span className="toggle-label">{action.label}</span>
+                    <label className="toggle-switch">
+                      <input
+                        type="checkbox"
+                        checked={settings.slot_action_settings?.[action.key] !== false}
+                        onChange={e => saveSetting('slot_action_settings', {
+                          ...settings.slot_action_settings,
+                          [action.key]: e.target.checked,
+                        })}
+                      />
+                      <span className="toggle-slider" />
+                    </label>
+                  </div>
+                ))}
+              </div>
+            </div>
+
+            <div className="parking-handling-grid parking-handling-secondary">
+              <div className="parking-handling-col parking-rates-section">
+                <h3 style={{ fontSize: '13px', fontWeight: 600 }}>Rates & Capacity</h3>
+                <div className="settings-form parking-rates-grid" style={{ maxWidth: '100%' }}>
+                  <div className="form-group">
+                    <label>Car Hourly Rate (₱)</label>
+                    <input type="number" defaultValue={settings.hourly_rate_car || 50}
+                      onBlur={e => saveSetting('hourly_rate_car', parseInt(e.target.value))} />
+                  </div>
+                  <div className="form-group">
+                    <label>Motorcycle Hourly Rate (₱)</label>
+                    <input type="number" defaultValue={settings.hourly_rate_motorcycle || 25}
+                      onBlur={e => saveSetting('hourly_rate_motorcycle', parseInt(e.target.value))} />
+                  </div>
+                  <div className="form-group">
+                    <label>Max Capacity — Cars</label>
+                    <input type="number" defaultValue={settings.max_capacity_cars || 30}
+                      onBlur={e => saveSetting('max_capacity_cars', parseInt(e.target.value))} />
+                  </div>
+                  <div className="form-group">
+                    <label>Max Capacity — Motorcycles</label>
+                    <input type="number" defaultValue={settings.max_capacity_motorcycles || 20}
+                      onBlur={e => saveSetting('max_capacity_motorcycles', parseInt(e.target.value))} />
+                  </div>
+                </div>
+              </div>
+
+            </div>
+
+            <div className="parking-handling-col receipt-customization-section">
+              <h3 style={{ fontSize: '13px', fontWeight: 600 }}>Receipt Customization</h3>
+              <div className="settings-form" style={{ maxWidth: '100%' }}>
+                <div className="form-group">
+                  <label>Header Text</label>
+                  <input defaultValue={settings.receipt_template?.header || 'PLPark Parking System'}
+                    onBlur={e => saveSetting('receipt_template', { ...settings.receipt_template, header: e.target.value })} />
+                </div>
+                <div className="form-group">
+                  <label>Address</label>
+                  <input defaultValue={settings.receipt_template?.address || 'Pasig City, Philippines'}
+                    onBlur={e => saveSetting('receipt_template', { ...settings.receipt_template, address: e.target.value })} />
+                </div>
+                <div className="form-group">
+                  <label>Footer Text</label>
+                  <input defaultValue={settings.receipt_template?.footer || 'Thank you for parking with us!'}
+                    onBlur={e => saveSetting('receipt_template', { ...settings.receipt_template, footer: e.target.value })} />
                 </div>
               </div>
             </div>
