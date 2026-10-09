@@ -71,6 +71,13 @@ export function Dashboard() {
   const [isEntryModalOpen, setIsEntryModalOpen] = useState(false);
   const [isExitModalOpen, setIsExitModalOpen] = useState(false);
   const [selectedRecognition, setSelectedRecognition] = useState<PlateRecognition | null>(null);
+  const [recognitionVehicleDetails, setRecognitionVehicleDetails] = useState<{
+    make: string | null;
+    color: string | null;
+    ownerName: string | null;
+    ownerEmail: string | null;
+  } | null>(null);
+  const [isLoadingRecognitionVehicle, setIsLoadingRecognitionVehicle] = useState(false);
   const [exitConfirmSession, setExitConfirmSession] = useState<ParkingSession | null>(null);
 
   /** Manual Entry Form state */
@@ -218,6 +225,41 @@ export function Dashboard() {
   const recognitionMatchedPayment = recognitionMatchedSession
     ? payments.find(p => p.session_id === recognitionMatchedSession.id && p.status === 'completed')
     : (selectedRecognition ? payments.find(p => p.plate_number.toUpperCase() === selectedRecognition.plate_number.toUpperCase() && p.status === 'completed') : null);
+
+  useEffect(() => {
+    let isCurrent = true;
+    if (!selectedRecognition) {
+      setRecognitionVehicleDetails(null);
+      setIsLoadingRecognitionVehicle(false);
+      return () => { isCurrent = false; };
+    }
+
+    const loadVehicleDetails = async () => {
+      setIsLoadingRecognitionVehicle(true);
+      const normalizedPlate = selectedRecognition.plate_number.toUpperCase().replace(/[\s-]+/g, '');
+      const { data: vehicle } = await supabase.from('vehicles')
+        .select('make, color, app_user_id')
+        .eq('normalized_plate_number', normalizedPlate)
+        .maybeSingle();
+      const appUserId = vehicle?.app_user_id || recognitionMatchedSession?.app_user_id;
+      const { data: owner } = appUserId
+        ? await supabase.from('app_users').select('full_name, email').eq('id', appUserId).maybeSingle()
+        : { data: null };
+
+      if (isCurrent) {
+        setRecognitionVehicleDetails({
+          make: vehicle?.make || null,
+          color: vehicle?.color || recognitionMatchedSession?.color || null,
+          ownerName: owner?.full_name || null,
+          ownerEmail: owner?.email || null,
+        });
+        setIsLoadingRecognitionVehicle(false);
+      }
+    };
+
+    void loadVehicleDetails();
+    return () => { isCurrent = false; };
+  }, [selectedRecognition, recognitionMatchedSession?.app_user_id, recognitionMatchedSession?.color]);
 
   // ============================================================
   // ACTION HANDLERS
@@ -724,6 +766,24 @@ export function Dashboard() {
                     ) : (
                       <span className="text-yellow font-semibold">Guest</span>
                     )}
+                  </span>
+                </div>
+                <div className="quick-look-cell">
+                  <span className="cell-label">Vehicle Make</span>
+                  <span className="cell-val">{isLoadingRecognitionVehicle ? 'Loading...' : recognitionVehicleDetails?.make || '—'}</span>
+                </div>
+                <div className="quick-look-cell">
+                  <span className="cell-label">Vehicle Color</span>
+                  <span className="cell-val">{isLoadingRecognitionVehicle ? 'Loading...' : recognitionVehicleDetails?.color || '—'}</span>
+                </div>
+                <div className="quick-look-cell">
+                  <span className="cell-label">Owner</span>
+                  <span className="cell-val">
+                    {isLoadingRecognitionVehicle
+                      ? 'Loading...'
+                      : recognitionVehicleDetails?.ownerName
+                        ? <>{recognitionVehicleDetails.ownerName}{recognitionVehicleDetails.ownerEmail && <small className="recognition-owner-email">{recognitionVehicleDetails.ownerEmail}</small>}</>
+                        : 'No linked account'}
                   </span>
                 </div>
                 <div className="quick-look-cell">

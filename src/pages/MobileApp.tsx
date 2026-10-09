@@ -62,6 +62,7 @@ interface Settings {
  */
 const formatTime = (iso: string) => new Date(iso).toLocaleString('en-US', { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
 const formatHour = (hour: number) => new Date(2000, 0, 1, hour).toLocaleTimeString('en-US', { hour: 'numeric' });
+const normalizePlate = (plate: string) => plate.toUpperCase().replace(/[\s-]+/g, '');
 
 /**
  * formatDuration — Helper to format active duration intervals (milliseconds) into hours/minutes text.
@@ -101,6 +102,7 @@ const IReceipt = (s: number) => <MIcon d="M6 2h12v20l-2-1.5-2 1.5-2-1.5-2 1.5-2-
 const ICheck = (s: number) => <MIcon d="M20 6L9 17l-5-5" size={s} />;
 const IArrow = (s: number) => <MIcon d="M19 12H5M12 19l-7-7 7-7" size={s} />;
 const IPlus = (s: number) => <MIcon d="M12 5v14M5 12h14" size={s} />;
+const IAllSlots = (s: number) => <MIcon d="M3 3h7v7H3z|14 3h7v7h-7z|3 14h7v7H3z|14 14h7v7h-7z" size={s} />;
 const IEdit = (s: number) => <MIcon d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7|18.5 2.5a2.12 2.12 0 0 1 3 3L12 15l-4 1 1-4Z" size={s} />;
 const ITrash = (s: number) => <MIcon d="M3 6h18|8 6V4h8v2|19 6v14H5V6|10 11v6M14 11v6" size={s} />;
 const ILogout = (s: number) => <MIcon d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4|16 17l5-5-5-5M21 12H9" size={s} />;
@@ -124,6 +126,7 @@ export function MobileApp() {
   const [user, setUser] = useState<AppUser | null>(null);
   const [vehicles, setVehicles] = useState<Vehicle[]>([]);
   const [parkingSlots, setParkingSlots] = useState<AvailableSlot[]>([]);
+  const [slotFilter, setSlotFilter] = useState<'all' | VehicleType>('all');
   const [peakHours, setPeakHours] = useState<number[]>([]);
   const [currentHour, setCurrentHour] = useState(new Date().getHours());
   const [activeSession, setActiveSession] = useState<ParkingSession | null>(null);
@@ -199,6 +202,7 @@ export function MobileApp() {
   const [registerForm, setRegisterForm] = useState({ first_name: '', last_name: '', email: '', phone: '', password: '' });
   const [passwordForm, setPasswordForm] = useState({ password: '', confirmPassword: '' });
   const [editingVehicleId, setEditingVehicleId] = useState<string | null>(null);
+  const [vehicleToDelete, setVehicleToDelete] = useState<Vehicle | null>(null);
 
   const loadParkingAvailability = useCallback(async () => {
     const weekAgo = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString();
@@ -403,7 +407,7 @@ export function MobileApp() {
   };
 
   const beginVehicleEdit = (vehicle: Vehicle) => {
-    setVehicleForm({ plate: vehicle.plate_number, type: vehicle.vehicle_type, make: vehicle.make || '', color: vehicle.color || '' });
+    setVehicleForm({ plate: vehicle.plate_number.toUpperCase(), type: vehicle.vehicle_type, make: vehicle.make?.toUpperCase() || '', color: vehicle.color?.toUpperCase() || '' });
     setEditingVehicleId(vehicle.id);
   };
 
@@ -415,13 +419,28 @@ export function MobileApp() {
     const payload = {
       plate_number: vehicleForm.plate.toUpperCase().trim(),
       vehicle_type: vehicleForm.type,
-      make: vehicleForm.make.trim(),
-      color: vehicleForm.color.trim(),
+      make: vehicleForm.make.trim().toUpperCase(),
+      color: vehicleForm.color.trim().toUpperCase(),
     };
+    const normalizedPlate = normalizePlate(payload.plate_number);
+    const { data: existingVehicle, error: duplicateCheckError } = await supabase.from('vehicles')
+      .select('id').eq('normalized_plate_number', normalizedPlate).maybeSingle();
+    if (duplicateCheckError) {
+      showToast(duplicateCheckError.code === '42703' ? 'Apply the latest mobile account and vehicle migration.' : 'Could not verify plate number. Try again.', 'error');
+      return;
+    }
+    if (existingVehicle && existingVehicle.id !== editingVehicleId) {
+      showToast('This plate is already registered to an account.', 'error');
+      return;
+    }
     const result = editingVehicleId
       ? await supabase.from('vehicles').update(payload).eq('id', editingVehicleId).eq('app_user_id', user.id).select().single()
       : await supabase.from('vehicles').insert({ ...payload, app_user_id: user.id }).select().single();
-    if (result.error) { showToast(result.error.message.includes('make') ? 'Apply the vehicle make migration, then try again.' : 'Could not save vehicle', 'error'); return; }
+    if (result.error) {
+      if (result.error.code === '23505') showToast('This plate is already registered to an account.', 'error');
+      else showToast(result.error.message.includes('make') ? 'Apply the vehicle make migration, then try again.' : 'Could not save vehicle', 'error');
+      return;
+    }
     if (editingVehicleId) setVehicles(prev => prev.map(vehicle => vehicle.id === editingVehicleId ? result.data as Vehicle : vehicle));
     else setVehicles(prev => [...prev, result.data as Vehicle]);
     resetVehicleForm();
@@ -429,9 +448,10 @@ export function MobileApp() {
   };
 
   const deleteVehicle = async (vehicle: Vehicle) => {
-    if (!user || !confirm(`Delete vehicle ${vehicle.plate_number}?`)) return;
+    if (!user) return;
     const { error } = await supabase.from('vehicles').delete().eq('id', vehicle.id).eq('app_user_id', user.id);
     if (error) { showToast('Could not delete vehicle', 'error'); return; }
+    setVehicleToDelete(null);
     setVehicles(prev => prev.filter(item => item.id !== vehicle.id));
     if (editingVehicleId === vehicle.id) resetVehicleForm();
     showToast('Vehicle deleted', 'success');
@@ -503,6 +523,7 @@ export function MobileApp() {
 
   const currency = settings.currency || '₱';
   const peakHourNow = peakHours.includes(currentHour);
+  const filteredParkingSlots = slotFilter === 'all' ? parkingSlots : parkingSlots.filter(slot => slot.vehicle_type === slotFilter);
 
   return (
     <div className="mobile-shell">
@@ -817,9 +838,16 @@ export function MobileApp() {
               )}
 
               <section className="m-slot-section">
-                <div className="m-preview-header">
+                <div className="m-preview-header m-slot-preview-header">
                   <h2 className="m-section-title">Parking Availability</h2>
-                  <span className="m-live-indicator"><span />LIVE</span>
+                  <div className="m-slot-header-actions">
+                    <span className="m-live-indicator"><span />LIVE</span>
+                    <div className="m-slot-filters" role="group" aria-label="Filter parking slots by vehicle type">
+                      <button type="button" className={slotFilter === 'all' ? 'active' : ''} aria-label="Show all slots" title="All slots" aria-pressed={slotFilter === 'all'} onClick={() => setSlotFilter('all')}>{IAllSlots(16)}</button>
+                      <button type="button" className={slotFilter === 'car' ? 'active' : ''} aria-label="Show car slots" title="Car slots" aria-pressed={slotFilter === 'car'} onClick={() => setSlotFilter('car')}>{ICar(17)}</button>
+                      <button type="button" className={slotFilter === 'motorcycle' ? 'active' : ''} aria-label="Show motorcycle slots" title="Motorcycle slots" aria-pressed={slotFilter === 'motorcycle'} onClick={() => setSlotFilter('motorcycle')}>{IBike(17)}</button>
+                    </div>
+                  </div>
                 </div>
                 <div className="m-peak-hours">
                   <span className="m-peak-label">Peak hours</span>
@@ -828,40 +856,21 @@ export function MobileApp() {
                     : <span className="m-peak-empty">No peak data yet</span>}
                   {peakHourNow && <span className="m-peak-now">PEAK NOW</span>}
                 </div>
-                {parkingSlots.length > 0 ? (
+                {filteredParkingSlots.length > 0 ? (
                   <div className="m-slot-grid">
-                    {parkingSlots.map(slot => (
+                    {filteredParkingSlots.map(slot => (
                       <div key={slot.id} className={`m-slot-card m-slot-${slot.status}`}>
-                        <strong>{slot.slot_id}</strong>
-                        <span className="m-slot-type">{slot.vehicle_type}</span>
+                        <div className="m-slot-card-header">
+                          <strong>{slot.slot_id}</strong>
+                          <span className="m-slot-type">{slot.vehicle_type}</span>
+                        </div>
                         <span className="m-slot-status">{slot.status}</span>
                         {peakHourNow && <span className="m-slot-peak-mark">Peak period</span>}
                       </div>
                     ))}
                   </div>
-                ) : <div className="m-empty-mini"><p>No parking slots are published yet.</p></div>}
+                ) : <div className="m-empty-mini"><p>{parkingSlots.length ? 'No slots for this vehicle type.' : 'No parking slots are published yet.'}</p></div>}
               </section>
-
-              {/* Quick actions panel */}
-              <div className="m-quick-actions">
-                <button className="m-quick-action" onClick={() => setScreen('vehicles')}>
-                  <span className="m-qa-icon m-qa-blue">{ICar(22)}</span>
-                  <span>My Vehicles</span>
-                  {vehicles.length > 0 && <span className="m-qa-badge">{vehicles.length}</span>}
-                </button>
-                <button className="m-quick-action" onClick={() => setScreen('sessions')}>
-                  <span className="m-qa-icon m-qa-green">{IClock(22)}</span>
-                  <span>Sessions</span>
-                </button>
-                <button className="m-quick-action" onClick={() => setScreen('payments')}>
-                  <span className="m-qa-icon m-qa-orange">{IReceipt(22)}</span>
-                  <span>Payments</span>
-                </button>
-                <button className="m-quick-action" onClick={() => setScreen('wallet')}>
-                  <span className="m-qa-icon m-qa-purple">{IWallet(22)}</span>
-                  <span>Wallet</span>
-                </button>
-              </div>
 
               {/* Vehicles summary list */}
               <div className="m-preview-section">
@@ -899,7 +908,7 @@ export function MobileApp() {
               <form className="m-add-vehicle" onSubmit={event => { event.preventDefault(); void saveVehicle(); }}>
                 <div className="m-field">
                   <label>Plate Number</label>
-                  <input value={vehicleForm.plate} onChange={e => setVehicleForm({ ...vehicleForm, plate: e.target.value })} placeholder="ABC 1234" required />
+                  <input className="m-uppercase" value={vehicleForm.plate} onChange={e => setVehicleForm({ ...vehicleForm, plate: e.target.value.toUpperCase() })} placeholder="ABC 1234" required />
                 </div>
                 <div className="m-field">
                   <label>Vehicle Type</label>
@@ -914,11 +923,11 @@ export function MobileApp() {
                 </div>
                 <div className="m-field">
                   <label>Vehicle Make</label>
-                  <input value={vehicleForm.make} onChange={e => setVehicleForm({ ...vehicleForm, make: e.target.value })} placeholder="Toyota" required />
+                  <input className="m-uppercase" value={vehicleForm.make} onChange={e => setVehicleForm({ ...vehicleForm, make: e.target.value.toUpperCase() })} placeholder="TOYOTA" required />
                 </div>
                 <div className="m-field">
                   <label>Vehicle Color</label>
-                  <input value={vehicleForm.color} onChange={e => setVehicleForm({ ...vehicleForm, color: e.target.value })} placeholder="Red" required />
+                  <input className="m-uppercase" value={vehicleForm.color} onChange={e => setVehicleForm({ ...vehicleForm, color: e.target.value.toUpperCase() })} placeholder="RED" required />
                 </div>
                 <button className="m-btn m-btn-primary m-btn-full" type="submit">
                   {editingVehicleId ? ICheck(16) : IPlus(16)} <span>{editingVehicleId ? 'Save Vehicle' : 'Add Vehicle'}</span>
@@ -938,7 +947,7 @@ export function MobileApp() {
                     </div>
                     <div className="m-vehicle-actions">
                       <button type="button" aria-label={`Edit ${v.plate_number}`} onClick={() => beginVehicleEdit(v)}>{IEdit(16)}</button>
-                      <button type="button" aria-label={`Delete ${v.plate_number}`} onClick={() => void deleteVehicle(v)}>{ITrash(16)}</button>
+                      <button type="button" aria-label={`Delete ${v.plate_number}`} onClick={() => setVehicleToDelete(v)}>{ITrash(16)}</button>
                     </div>
                   </div>
                 ))}
@@ -984,6 +993,20 @@ export function MobileApp() {
             </div>
           )}
         </div>
+
+        {vehicleToDelete && (
+          <div className="m-confirm-overlay" onClick={() => setVehicleToDelete(null)}>
+            <div className="m-confirm-dialog" role="alertdialog" aria-modal="true" aria-labelledby="remove-vehicle-title" onClick={event => event.stopPropagation()}>
+              <span className="m-confirm-icon">{ITrash(20)}</span>
+              <h2 id="remove-vehicle-title">Remove this vehicle?</h2>
+              <p><strong>{vehicleToDelete.plate_number}</strong> will be removed from your account.</p>
+              <div className="m-confirm-actions">
+                <button type="button" className="m-btn m-btn-ghost" onClick={() => setVehicleToDelete(null)}>Cancel</button>
+                <button type="button" className="m-btn m-confirm-danger" onClick={() => void deleteVehicle(vehicleToDelete)}>Remove Vehicle</button>
+              </div>
+            </div>
+          </div>
+        )}
 
         {/* Bottom navigation panel */}
         {user && ['dashboard', 'vehicles', 'sessions', 'payments', 'wallet'].includes(screen) && (

@@ -66,6 +66,7 @@ CREATE TABLE IF NOT EXISTS vehicles (
   id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
   app_user_id uuid REFERENCES app_users(id) ON DELETE CASCADE,
   plate_number text NOT NULL,
+  normalized_plate_number text GENERATED ALWAYS AS (upper(regexp_replace(plate_number, '[[:space:]-]+', '', 'g'))) STORED,
   vehicle_type text NOT NULL DEFAULT 'car',
   make text,
   color text,
@@ -248,6 +249,7 @@ CREATE INDEX IF NOT EXISTS idx_parking_sessions_status ON parking_sessions(statu
 CREATE INDEX IF NOT EXISTS idx_plate_recognitions_created ON plate_recognitions(created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_payments_created ON payments(created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_parking_slots_status ON parking_slots(status);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_vehicles_normalized_plate_unique ON vehicles(normalized_plate_number);
 
 -- ---------------------------------------------------------------------------
 -- 2. Seed data

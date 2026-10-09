@@ -133,7 +133,9 @@ export interface Vehicle {
   id: string;
   app_user_id: string | null;
   plate_number: string;
+  normalized_plate_number: string;
   vehicle_type: VehicleType;
+  make: string | null;
   color: string | null;
   image_url: string | null;
   created_at: string;
