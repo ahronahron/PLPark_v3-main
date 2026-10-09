@@ -108,19 +108,16 @@ interface TopbarProps {
   title: string;
   notifications: { id: string; type: string; title: string; message: string | null; created_at: string; is_read: boolean }[];
   onMarkAllRead: () => void;
-  onSignOut: () => void;
 }
 
 /**
  * Topbar — Top header bar for the admin dashboard (Clean layout without search bar).
  */
-export function Topbar({ title, notifications, onMarkAllRead, onSignOut }: TopbarProps) {
-  const [isProfileOpen, setIsProfileOpen] = useState(false);
+export function Topbar({ title, notifications, onMarkAllRead }: TopbarProps) {
   const [isNotificationsOpen, setIsNotificationsOpen] = useState(false);
   const [selectedNotification, setSelectedNotification] = useState<TopbarProps['notifications'][number] | null>(null);
 
   useEffect(() => {
-    setIsProfileOpen(false);
     setIsNotificationsOpen(false);
   }, [title]);
 
@@ -162,22 +159,15 @@ export function Topbar({ title, notifications, onMarkAllRead, onSignOut }: Topba
           </div>
         </div>
 
-        {/* User profile trigger and dropdown */}
+        {/* User profile */}
         <div className="profile-container">
-          <div className="profile-trigger" onClick={() => setIsProfileOpen(!isProfileOpen)}>
+          <div className="profile-trigger">
             <div className="user-avatar">A</div>
             <div className="user-info">
               <div className="user-name">Admin</div>
               <div className="user-role">Administrator</div>
             </div>
           </div>
-          {isProfileOpen && (
-            <div className="profile-dropdown">
-              <button className="dropdown-item" onClick={() => { setIsProfileOpen(false); onSignOut(); }}>
-                Sign Out
-              </button>
-            </div>
-          )}
         </div>
       </div>
       {selectedNotification && (

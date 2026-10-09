@@ -2,11 +2,9 @@
  * App.tsx — Root Application Component
  *
  * This is the top-level component that controls the entire
- * application layout and routing. Admin views are gated by
- * a Supabase Auth session; the mobile app remains public.
+ * application layout and routing.
  */
 import { useState, useEffect } from 'react';
-import type { Session } from '@supabase/supabase-js';
 import { Sidebar, Topbar, PageContainer } from '@/components/Layout';
 import { Dashboard } from '@/pages/Dashboard';
 import { Statistics } from '@/pages/Statistics';
@@ -14,11 +12,7 @@ import { SlotManagement } from '@/pages/SlotManagement';
 import { Logs } from '@/pages/Logs';
 import { Settings } from '@/pages/Settings';
 import { MobileApp } from '@/pages/MobileApp';
-import { LoginPage } from '@/pages/LoginPage';
 import { useNotifications } from '@/lib/hooks';
-import { supabase } from '@/lib/supabase';
-
-const BYPASS_ADMIN_LOGIN = true;
 
 /**
  * pageTitles — Maps internal page IDs to human-readable titles
@@ -32,34 +26,7 @@ const pageTitles: Record<string, string> = {
 };
 
 /**
- * stampAdminLogin — Links the Auth user to the `users` profile row
- * by email / user_id and records last_login.
- */
-async function stampAdminLogin(session: Session) {
-  const authUser = session.user;
-  const email = authUser.email;
-  if (!email) return;
-
-  const { data: existing } = await supabase
-    .from('users')
-    .select('id, user_id')
-    .eq('email', email)
-    .maybeSingle();
-
-  if (!existing) return;
-
-  await supabase
-    .from('users')
-    .update({
-      user_id: existing.user_id || authUser.id,
-      last_login: new Date().toISOString(),
-    })
-    .eq('id', existing.id);
-}
-
-/**
- * AdminShell — Dashboard chrome + pages. Mounted only when a
- * Supabase Auth session exists so data hooks run as `authenticated`.
+ * AdminShell — Dashboard chrome + pages.
  */
 function AdminShell({ onSwitchToMobile }: { onSwitchToMobile: () => void }) {
   const [page, setPage] = useState('dashboard');
@@ -75,11 +42,6 @@ function AdminShell({ onSwitchToMobile }: { onSwitchToMobile: () => void }) {
       localStorage.setItem('plp_sidebar_collapsed', String(next));
       return next;
     });
-  };
-
-  const handleSignOut = async () => {
-    if (!confirm('Are you sure you want to sign out?')) return;
-    await supabase.auth.signOut();
   };
 
   return (
@@ -103,7 +65,6 @@ function AdminShell({ onSwitchToMobile }: { onSwitchToMobile: () => void }) {
             title={pageTitles[page] || ''}
             notifications={notifications}
             onMarkAllRead={markAllRead}
-            onSignOut={handleSignOut}
           />
 
           <PageContainer className={page === 'dashboard' ? 'dashboard-page-container' : ''}>
@@ -135,8 +96,6 @@ function AdminShell({ onSwitchToMobile }: { onSwitchToMobile: () => void }) {
  */
 function App() {
   const [view, setView] = useState<'admin' | 'mobile'>('admin');
-  const [session, setSession] = useState<Session | null>(null);
-  const [authReady, setAuthReady] = useState(false);
 
   useEffect(() => {
     const userAgent = navigator.userAgent || navigator.vendor || (window as unknown as { opera?: string }).opera || '';
@@ -144,28 +103,6 @@ function App() {
     if (isMobile) {
       setView('mobile');
     }
-  }, []);
-
-  useEffect(() => {
-    let mounted = true;
-
-    supabase.auth.getSession().then(({ data: { session: current } }) => {
-      if (!mounted) return;
-      setSession(current);
-      setAuthReady(true);
-    });
-
-    const { data: { subscription } } = supabase.auth.onAuthStateChange((event, nextSession) => {
-      setSession(nextSession);
-      if (event === 'SIGNED_IN' && nextSession) {
-        void stampAdminLogin(nextSession);
-      }
-    });
-
-    return () => {
-      mounted = false;
-      subscription.unsubscribe();
-    };
   }, []);
 
   if (view === 'mobile') {
@@ -178,21 +115,6 @@ function App() {
         <MobileApp />
       </div>
     );
-  }
-
-  if (!authReady && !BYPASS_ADMIN_LOGIN) {
-    return (
-      <div className="login-page">
-        <div className="login-card">
-          <div className="sidebar-title">PLPark</div>
-          <p className="login-copy">Loading session…</p>
-        </div>
-      </div>
-    );
-  }
-
-  if (!session && !BYPASS_ADMIN_LOGIN) {
-    return <LoginPage />;
   }
 
   return <AdminShell onSwitchToMobile={() => setView('mobile')} />;

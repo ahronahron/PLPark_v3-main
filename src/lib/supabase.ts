@@ -37,7 +37,13 @@ const supabaseAnonKey = import.meta.env.VITE_SUPABASE_ANON_KEY;
  * updates, and deletes. Import this in any file that needs
  * to interact with the database.
  */
-export const supabase = createClient(supabaseUrl, supabaseAnonKey);
+export const supabase = createClient(supabaseUrl, supabaseAnonKey, {
+  auth: {
+    autoRefreshToken: false,
+    persistSession: false,
+    detectSessionInUrl: false,
+  },
+});
 
 export async function logActivity(action: string, module: string, details: Record<string, unknown> | string) {
   const payload = typeof details === 'string' ? details : JSON.stringify(details);

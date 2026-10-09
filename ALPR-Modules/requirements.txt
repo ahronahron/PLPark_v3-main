@@ -1,4 +1,5 @@
 ultralytics==8.0.114
+setuptools
 pandas
 opencv-python
 numpy

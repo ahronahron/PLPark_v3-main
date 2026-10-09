@@ -315,11 +315,18 @@ export class YOLODetector {
   }
 
   /**
-   * loadModel — Downloads and initializes the ONNX model.
-   *
-   * @param modelPath — Path to the .onnx file (default: /models/yolov8n.onnx)
+   * loadModel — Uses the Python YOLO service when configured, otherwise falls
+   * back to the legacy browser ONNX detector for compatibility.
    */
   async loadModel(modelPath = '/models/yolov8n.onnx'): Promise<void> {
+    const pythonUrl = import.meta.env.VITE_SLOT_MONITOR_URL || '';
+
+    if (pythonUrl) {
+      this._isLoaded = true;
+      console.log('[YOLODetector] Using Python YOLO service at', pythonUrl);
+      return;
+    }
+
     try {
       // Configure ONNX Runtime WASM paths to match installed version (1.27.0)
       ort.env.wasm.wasmPaths = 'https://cdn.jsdelivr.net/npm/onnxruntime-web@1.27.0/dist/';
@@ -346,19 +353,60 @@ export class YOLODetector {
   /**
    * detect — Runs YOLO inference on an image frame.
    *
-   * Preprocesses the image (resize, normalize), runs the model,
-   * and post-processes results with NMS. Only returns vehicle detections.
-   *
-   * @param imageData — Raw pixel data from the video frame
-   * @param confThreshold — Minimum confidence score (default: 0.45)
-   * @param iouThreshold — IoU threshold for NMS (default: 0.5)
-   * @returns Array of vehicle Detection objects
+   * Prefer the real-time Python YOLO service when configured because it gives
+   * more reliable object detection than the browser-side ONNX model.
    */
   async detect(
     imageData: ImageData,
     confThreshold = 0.45,
     iouThreshold = 0.5
   ): Promise<Detection[]> {
+    const pythonUrl = import.meta.env.VITE_SLOT_MONITOR_URL || '';
+    if (pythonUrl) {
+      const canvas = document.createElement('canvas');
+      canvas.width = imageData.width;
+      canvas.height = imageData.height;
+      const ctx = canvas.getContext('2d');
+      if (!ctx) return [];
+      ctx.putImageData(imageData, 0, 0);
+      const encoded = canvas.toDataURL('image/jpeg', 0.85);
+
+      const response = await fetch(`${pythonUrl}/detect`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ image: encoded, conf: Math.max(0.1, confThreshold), iou: iouThreshold }),
+      });
+
+      if (!response.ok) {
+        console.error('[YOLODetector] Python YOLO service failed:', response.status, response.statusText);
+        return [];
+      }
+
+      const json = await response.json();
+      const detections = (json.detections || []) as Array<{
+        class_id: number;
+        class_name: string;
+        confidence: number;
+        bbox: [number, number, number, number];
+      }>;
+
+      return detections
+        .filter(det => {
+          const name = det.class_name?.toLowerCase?.() ?? '';
+          return ['car', 'truck', 'bus', 'motorcycle', 'van', 'bicycle', 'person', 'train', 'boat'].includes(name);
+        })
+        .map(det => ({
+          classId: det.class_id,
+          className: det.class_name,
+          confidence: det.confidence,
+          bbox: det.bbox,
+          vehicleType: ['car', 'truck', 'bus', 'motorcycle', 'van'].includes(det.class_name.toLowerCase())
+            ? (det.class_name.toLowerCase() === 'motorcycle' ? 'motorcycle' : 'car')
+            : null,
+          color: null,
+        }));
+    }
+
     if (!this.session) return [];
 
     const { width: origW, height: origH } = imageData;
@@ -1692,32 +1740,81 @@ function isPointInPolygon(point: [number, number], polygon: [number, number][]):
  * @param polygon — polygon vertices in normalized 0-1 coordinates
  * @returns true if the bbox overlaps the polygon
  */
+function segmentsIntersect(
+  a1: [number, number],
+  a2: [number, number],
+  b1: [number, number],
+  b2: [number, number]
+): boolean {
+  const orientation = (p: [number, number], q: [number, number], r: [number, number]) => {
+    const val = (q[1] - p[1]) * (r[0] - q[0]) - (q[0] - p[0]) * (r[1] - q[1]);
+    if (Math.abs(val) < 1e-9) return 0;
+    return val > 0 ? 1 : 2;
+  };
+
+  const onSegment = (p: [number, number], q: [number, number], r: [number, number]) => {
+    if (
+      Math.min(p[0], r[0]) <= q[0] && q[0] <= Math.max(p[0], r[0]) &&
+      Math.min(p[1], r[1]) <= q[1] && q[1] <= Math.max(p[1], r[1])
+    ) {
+      return true;
+    }
+    return false;
+  };
+
+  const o1 = orientation(a1, a2, b1);
+  const o2 = orientation(a1, a2, b2);
+  const o3 = orientation(b1, b2, a1);
+  const o4 = orientation(b1, b2, a2);
+
+  if (o1 !== o2 && o3 !== o4) return true;
+  if (o1 === 0 && onSegment(a1, b1, a2)) return true;
+  if (o2 === 0 && onSegment(a1, b2, a2)) return true;
+  if (o3 === 0 && onSegment(b1, a1, b2)) return true;
+  if (o4 === 0 && onSegment(b1, a2, b2)) return true;
+  return false;
+}
+
 function doesBboxOverlapPolygon(
   bbox: [number, number, number, number],
   polygon: [number, number][],
   frameWidth: number,
   frameHeight: number
 ): boolean {
+  if (!polygon || polygon.length < 3) return false;
+
   // Convert bbox from pixel coords to normalized 0-1
   const nx1 = bbox[0] / frameWidth;
   const ny1 = bbox[1] / frameHeight;
   const nx2 = bbox[2] / frameWidth;
   const ny2 = bbox[3] / frameHeight;
 
-  // Test centroid
-  const cx: [number, number] = [(nx1 + nx2) / 2, (ny1 + ny2) / 2];
-  if (isPointInPolygon(cx, polygon)) return true;
-
-  // Test bottom-center (most reliable — wheels touch the ground)
-  const bc: [number, number] = [(nx1 + nx2) / 2, ny2];
-  if (isPointInPolygon(bc, polygon)) return true;
-
-  // Test 4 corners
-  const corners: [number, number][] = [
-    [nx1, ny1], [nx2, ny1], [nx1, ny2], [nx2, ny2]
+  const rectPoints: [number, number][] = [
+    [nx1, ny1],
+    [nx2, ny1],
+    [nx2, ny2],
+    [nx1, ny2],
   ];
-  for (const corner of corners) {
-    if (isPointInPolygon(corner, polygon)) return true;
+
+  // Check whether any rectangle corner or center lies inside the slot polygon.
+  const testPoints: [number, number][] = [
+    [(nx1 + nx2) / 2, (ny1 + ny2) / 2],
+    [(nx1 + nx2) / 2, ny2],
+    ...rectPoints
+  ];
+  for (const point of testPoints) {
+    if (isPointInPolygon(point, polygon)) return true;
+  }
+
+  // Handle cases where the box crosses the polygon boundary but the center is just outside.
+  for (let i = 0; i < polygon.length; i++) {
+    const p1 = polygon[i];
+    const p2 = polygon[(i + 1) % polygon.length];
+    for (let j = 0; j < rectPoints.length; j++) {
+      const r1 = rectPoints[j];
+      const r2 = rectPoints[(j + 1) % rectPoints.length];
+      if (segmentsIntersect(p1, p2, r1, r2)) return true;
+    }
   }
 
   return false;
@@ -1880,8 +1977,10 @@ export class SlotMonitorProcessor {
       const frame = this.cameraManager.captureFrame();
       if (!frame) return;
 
-      // Run YOLO detection
-      const detections = await this.detector.detect(frame.imageData, 0.40, 0.45);
+      // Run YOLO detection with a lower threshold for slot occupancy. The AOI
+      // logic is used to confirm whether a vehicle is actually inside a slot,
+      // so a slightly more permissive detector reduces false negatives.
+      const detections = await this.detector.detect(frame.imageData, 0.18, 0.55);
       this._detections = detections;
       this.detectionCallbacks.forEach(cb => cb(detections));
 
