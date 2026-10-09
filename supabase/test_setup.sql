@@ -12,6 +12,7 @@
 --   6. 20260825090000_camera_connection_details.sql
 --   7. 20260922090000_admin_auth_rls.sql
 --   8. 20261009090000_mobile_account_vehicle_fields.sql
+--   9. 20261009110000_prevent_duplicate_active_sessions.sql
 --
 -- Original migration files were not modified.
 -- Storage recap + dashboard steps are at the bottom (section 8).
@@ -105,6 +106,7 @@ CREATE POLICY "anon_delete_parking_slots" ON parking_slots FOR DELETE TO anon, a
 CREATE TABLE IF NOT EXISTS parking_sessions (
   id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
   plate_number text NOT NULL,
+  normalized_plate_number text GENERATED ALWAYS AS (upper(regexp_replace(plate_number, '[[:space:]-]+', '', 'g'))) STORED,
   vehicle_type text NOT NULL DEFAULT 'car',
   color text,
   image_url text,
@@ -250,6 +252,7 @@ CREATE INDEX IF NOT EXISTS idx_plate_recognitions_created ON plate_recognitions(
 CREATE INDEX IF NOT EXISTS idx_payments_created ON payments(created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_parking_slots_status ON parking_slots(status);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_vehicles_normalized_plate_unique ON vehicles(normalized_plate_number);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_parking_sessions_one_active_plate ON parking_sessions(normalized_plate_number) WHERE status = 'active';
 
 -- ---------------------------------------------------------------------------
 -- 2. Seed data

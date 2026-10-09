@@ -1215,6 +1215,16 @@ export class EntranceProcessor {
             const confidence = ocrRes.confidence;
 
             this.triggerCooldown = true;
+            this.lockedPlates.add(plateNumber);
+            if (await this.hasActiveSession(plateNumber)) {
+              console.info(`[EntranceProcessor] Ignoring repeat entry scan for active vehicle ${plateNumber}`);
+              this._isProcessingSnapshot = false;
+              this.setStatus('scanning');
+              setTimeout(() => { this.triggerCooldown = false; }, 8000);
+              setTimeout(() => { this.lockedPlates.delete(plateNumber); }, 15000);
+              return;
+            }
+
             this.setStatus('confirmed');
             console.log(`[EntranceProcessor] ⚡ Real-time plate confirmed: ${plateNumber} (${confidence}%)`);
 
@@ -1234,7 +1244,6 @@ export class EntranceProcessor {
               appUserId,
             };
 
-            this.lockedPlates.add(plateNumber);
             this._lastResult = result;
             // INSTANTLY EMIT TO FRONT-END UI!
             this.resultCallbacks.forEach(cb => cb(result));
@@ -1394,8 +1403,23 @@ export class EntranceProcessor {
     return { isPrivate: false, appUserId: null };
   }
 
+  private async hasActiveSession(plate: string): Promise<boolean> {
+    const { data, error } = await supabase.from('parking_sessions').select('plate_number').eq('status', 'active');
+    if (error) {
+      console.error('[EntranceProcessor] Could not verify active session; blocking entry:', error);
+      return true;
+    }
+    const normalizedPlate = plate.toUpperCase().replace(/[\s-]+/g, '');
+    return Boolean(data?.some(session => session.plate_number.toUpperCase().replace(/[\s-]+/g, '') === normalizedPlate));
+  }
+
   private async createSession(result: EntranceResult): Promise<void> {
     try {
+      if (await this.hasActiveSession(result.plateNumber)) {
+        console.info(`[EntranceProcessor] Skipping duplicate active session for ${result.plateNumber}`);
+        return;
+      }
+
       const visitorModeEnabled = await this.getVisitorEntryMode();
 
       await supabase.from('plate_recognitions').insert({
@@ -1413,7 +1437,7 @@ export class EntranceProcessor {
         return;
       }
 
-      await supabase.from('parking_sessions').insert({
+      const { error: sessionInsertError } = await supabase.from('parking_sessions').insert({
         plate_number: result.plateNumber,
         vehicle_type: result.vehicleType,
         color: result.color,
@@ -1424,6 +1448,13 @@ export class EntranceProcessor {
         entry_time: new Date().toISOString(),
         app_user_id: result.appUserId,
       });
+      if (sessionInsertError) {
+        if (sessionInsertError.code === '23505') {
+          console.info(`[EntranceProcessor] Database rejected duplicate active session for ${result.plateNumber}`);
+          return;
+        }
+        throw sessionInsertError;
+      }
 
       await supabase.from('notifications').insert({
         type: result.isPrivate ? 'info' : 'success',
