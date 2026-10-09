@@ -38,6 +38,8 @@ import {
 } from '@/components/Icons';
 import { CameraFeed } from '@/components/CameraFeed';
 import type { EntranceResult, ExitResult } from '@/lib/visionEngine';
+import { settleRegisteredSessionWallet } from '@/lib/wallet';
+import { calculateBillableHours, calculateParkingFee } from '@/lib/parkingFees';
 
 /** Helper to get current datetime formatted for datetime-local input */
 const getCurrentDateTimeLocal = (): string => {
@@ -58,6 +60,11 @@ export function Dashboard() {
   const [cameraTab, setCameraTab] = useState<'entrance' | 'exit' | 'slot'>('entrance');
   const [maxCars, setMaxCars] = useState(30);
   const [maxMotos, setMaxMotos] = useState(20);
+  const [hourlyRateCars, setHourlyRateCars] = useState(50);
+  const [hourlyRateMotos, setHourlyRateMotos] = useState(25);
+  const [gracePeriodMinutes, setGracePeriodMinutes] = useState(0);
+  const [allowManualExit, setAllowManualExit] = useState(false);
+  const [enabledPaymentMethods, setEnabledPaymentMethods] = useState<PaymentMethod[]>(['cash', 'gcash', 'card']);
   const [visitorEntryMode, setVisitorEntryMode] = useState(false);
   const [guestReviewRequest, setGuestReviewRequest] = useState<{
     plateNumber: string;
@@ -123,6 +130,11 @@ export function Dashboard() {
         const m = Object.fromEntries(data.map((r: any) => [r.key, r.value]));
         setMaxCars(Number(m.max_capacity_cars) || 30);
         setMaxMotos(Number(m.max_capacity_motorcycles) || 20);
+        setHourlyRateCars(Number(m.hourly_rate_car) || 50);
+        setHourlyRateMotos(Number(m.hourly_rate_motorcycle) || 25);
+        setGracePeriodMinutes(Math.max(0, Number(m.grace_period_minutes) || 0));
+        setAllowManualExit(Boolean(m.allow_manual_exit));
+        setEnabledPaymentMethods(Array.isArray(m.payment_methods) ? m.payment_methods as PaymentMethod[] : ['cash', 'gcash', 'card']);
         setVisitorEntryMode(Boolean(m.visitor_entry_mode));
       }
     });
@@ -211,10 +223,9 @@ export function Dashboard() {
 
   // Calculate duration & fee for exit session
   const calculateExitDetails = (session: ParkingSession) => {
-    const entryDate = new Date(session.entry_time);
-    const durationHours = Math.max(0.5, Math.ceil(((Date.now() - entryDate.getTime()) / 3600000) * 2) / 2);
-    const rate = session.vehicle_type === 'motorcycle' ? 25 : 50;
-    const totalAmount = durationHours * rate;
+    const durationHours = calculateBillableHours(session.entry_time, Date.now(), gracePeriodMinutes);
+    const rate = session.vehicle_type === 'motorcycle' ? hourlyRateMotos : hourlyRateCars;
+    const totalAmount = calculateParkingFee(durationHours, rate);
     return { durationHours, rate, totalAmount };
   };
 
@@ -309,7 +320,7 @@ export function Dashboard() {
 
   /** Handle Manual Entry Submit */
   const handleManualEntrySubmit = async () => {
-    const formattedPlate = manualForm.plate.toUpperCase().replace(/[^A-Z0-9 -]/g, '').trim();
+    const formattedPlate = manualForm.plate.toUpperCase().replace(/[^A-Z0-9-]/g, '').trim();
 
     if (!formattedPlate || formattedPlate.length < 3) {
       setEntryStatus({ msg: 'Please enter a valid plate number (at least 3 characters).', ok: false });
@@ -317,26 +328,49 @@ export function Dashboard() {
     }
 
     const time = manualForm.time ? new Date(manualForm.time).toISOString() : new Date().toISOString();
+    const normalizedPlate = formattedPlate.replace(/[\s-]+/g, '');
+    const { data: activeSession, error: activeSessionError } = await supabase.from('parking_sessions')
+      .select('id').eq('normalized_plate_number', normalizedPlate).eq('status', 'active').maybeSingle();
+    if (activeSessionError) {
+      setEntryStatus({ msg: 'Could not check active sessions. Apply the latest database migrations.', ok: false });
+      return;
+    }
+    if (activeSession) {
+      setEntryStatus({ msg: `${formattedPlate} already has an active parking session.`, ok: false });
+      return;
+    }
+
+    const { data: registeredVehicle, error: vehicleError } = await supabase.from('vehicles')
+      .select('plate_number, app_user_id, vehicle_type, color')
+      .eq('normalized_plate_number', normalizedPlate)
+      .maybeSingle();
+    if (vehicleError) {
+      setEntryStatus({ msg: 'Could not verify the registered vehicle.', ok: false });
+      return;
+    }
+    const sessionPlate = registeredVehicle?.plate_number || formattedPlate;
 
     // 1. Create a parking session
     const { error: sessionErr } = await supabase.from('parking_sessions').insert({
-      plate_number: formattedPlate,
-      vehicle_type: manualForm.type,
+      plate_number: sessionPlate,
+      vehicle_type: registeredVehicle?.vehicle_type || manualForm.type,
+      color: registeredVehicle?.color || null,
       entry_time: time,
       entry_camera: 'Manual Entry',
       status: 'active',
-      concept: 'A',
+      concept: registeredVehicle?.app_user_id ? 'B' : 'A',
+      app_user_id: registeredVehicle?.app_user_id || null,
     });
 
     if (sessionErr) {
-      setEntryStatus({ msg: 'Error creating session: ' + sessionErr.message, ok: false });
+      setEntryStatus({ msg: sessionErr.code === '23505' ? `${sessionPlate} already has an active parking session.` : 'Error creating session: ' + sessionErr.message, ok: false });
       return;
     }
 
     // 2. Log recognition event
     await supabase.from('plate_recognitions').insert({
-      plate_number: formattedPlate,
-      vehicle_type: manualForm.type,
+      plate_number: sessionPlate,
+      vehicle_type: registeredVehicle?.vehicle_type || manualForm.type,
       direction: 'entry',
       confidence: 100,
       camera_name: 'Manual Entry',
@@ -346,12 +380,12 @@ export function Dashboard() {
     // 3. Create notification
     await supabase.from('notifications').insert({
       type: 'info',
-      title: `Manual Entry: ${formattedPlate}`,
-      message: `Vehicle (${manualForm.type}) logged manually at ${new Date(time).toLocaleTimeString()}.`,
+      title: `Manual Entry: ${sessionPlate}`,
+      message: `Vehicle (${registeredVehicle?.vehicle_type || manualForm.type}) logged manually${registeredVehicle?.app_user_id ? ' for a registered app user' : ''} at ${new Date(time).toLocaleTimeString()}.`,
     });
-    await logActivity('Recorded manual entry', 'Parking Sessions', { plate_number: formattedPlate, vehicle_type: manualForm.type, entry_time: time });
+    await logActivity('Recorded manual entry', 'Parking Sessions', { plate_number: sessionPlate, vehicle_type: registeredVehicle?.vehicle_type || manualForm.type, app_user_id: registeredVehicle?.app_user_id || null, entry_time: time });
 
-    setEntryStatus({ msg: `Vehicle ${formattedPlate} logged successfully ✓`, ok: true });
+    setEntryStatus({ msg: `Vehicle ${sessionPlate} logged successfully${registeredVehicle?.app_user_id ? ' and linked to its account' : ''} ✓`, ok: true });
     refreshData();
 
     setTimeout(() => {
@@ -365,8 +399,17 @@ export function Dashboard() {
   const handleProcessManualPayment = async () => {
     if (!selectedExitSession) return;
 
-    if (selectedExitSession.concept === 'A' && !sessionPayment) {
-      setExitStatus({ msg: 'Guest session payment must be completed via the public app before exit.', ok: false });
+    if (selectedExitSession.app_user_id) {
+      setExitStatus({ msg: 'This registered account will be charged automatically when the exit is completed.', ok: false });
+      return;
+    }
+
+    if (selectedExitSession.concept === 'A' && !sessionPayment && !allowManualExit) {
+      setExitStatus({ msg: 'Manual guest payment is disabled; use the public app before exit.', ok: false });
+      return;
+    }
+    if (!enabledPaymentMethods.includes(exitPaymentMethod)) {
+      setExitStatus({ msg: 'This payment gateway is disabled in Parking Handling settings.', ok: false });
       return;
     }
 
@@ -375,6 +418,10 @@ export function Dashboard() {
 
     try {
       const { durationHours, rate, totalAmount } = calculateExitDetails(selectedExitSession);
+      if (totalAmount <= 0) {
+        setExitStatus({ msg: 'No fee is due during the grace period.', ok: true });
+        return;
+      }
       const { data: countData } = await supabase.from('payments').select('id');
       const receiptNum = `RCP-${new Date().getFullYear()}-${String((countData?.length || 0) + 1).padStart(4, '0')}`;
 
@@ -411,8 +458,13 @@ export function Dashboard() {
   const handlePromptExitConfirm = () => {
     if (!selectedExitSession) return;
 
-    if (selectedExitSession.concept === 'A' && !isSessionPaid) {
-      setExitStatus({ msg: 'Guest exit is blocked until payment is completed through the public app.', ok: false });
+    const { totalAmount } = calculateExitDetails(selectedExitSession);
+    if (selectedExitSession.concept === 'A' && !isSessionPaid && totalAmount > 0 && !allowManualExit) {
+      setExitStatus({ msg: 'Manual guest payment is disabled; use the public app before exit.', ok: false });
+      return;
+    }
+    if (selectedExitSession.concept === 'A' && !isSessionPaid && totalAmount > 0 && !enabledPaymentMethods.includes(exitPaymentMethod)) {
+      setExitStatus({ msg: 'Enable an allowed manual payment method before completing exit.', ok: false });
       return;
     }
 
@@ -423,14 +475,52 @@ export function Dashboard() {
   const handleConfirmExit = async () => {
     if (!exitConfirmSession) return;
 
-    if (exitConfirmSession.concept === 'A' && !payments.some(p => p.session_id === exitConfirmSession.id && p.status === 'completed')) {
-      setExitStatus({ msg: 'Guest entry must be paid through the public app before exit is allowed.', ok: false });
-      setExitConfirmSession(null);
-      return;
+    const session = exitConfirmSession;
+    const { durationHours, rate, totalAmount } = calculateExitDetails(session);
+    if (session.concept === 'A' && totalAmount > 0) {
+      const { data: guestPayment, error } = await supabase.from('payments').select('id')
+        .eq('session_id', session.id).eq('status', 'completed').maybeSingle();
+      if (error || !guestPayment) {
+        if (!allowManualExit) {
+          setExitStatus({ msg: 'Manual guest payment is disabled; use the public app before exit.', ok: false });
+          setExitConfirmSession(null);
+          return;
+        }
+        if (!enabledPaymentMethods.includes(exitPaymentMethod)) {
+          setExitStatus({ msg: 'The selected manual payment method is disabled.', ok: false });
+          return;
+        }
+        const { data: countData } = await supabase.from('payments').select('id');
+        const receiptNum = `RCP-${new Date().getFullYear()}-${String((countData?.length || 0) + 1).padStart(4, '0')}`;
+        const { error: manualPaymentError } = await supabase.from('payments').insert({
+          receipt_number: receiptNum,
+          plate_number: session.plate_number,
+          session_id: session.id,
+          duration_hours: durationHours,
+          hourly_rate: rate,
+          total_amount: totalAmount,
+          payment_method: exitPaymentMethod,
+          status: 'completed',
+          processed_by: 'Admin manual exit',
+        });
+        if (manualPaymentError) {
+          setExitStatus({ msg: `Could not record manual payment: ${manualPaymentError.message}`, ok: false });
+          return;
+        }
+      }
     }
 
-    const session = exitConfirmSession;
     const exitTime = new Date().toISOString();
+
+    if (session.app_user_id) {
+      const { durationHours, rate } = calculateExitDetails(session);
+      try {
+        await settleRegisteredSessionWallet(session, durationHours, rate, 'Admin manual exit');
+      } catch (walletError) {
+        setExitStatus({ msg: walletError instanceof Error ? walletError.message : 'Wallet deduction failed; exit was not completed.', ok: false });
+        return;
+      }
+    }
 
     // 1. Complete session
     await supabase.from('parking_sessions').update({
@@ -782,7 +872,7 @@ export function Dashboard() {
                     {isLoadingRecognitionVehicle
                       ? 'Loading...'
                       : recognitionVehicleDetails?.ownerName
-                        ? <>{recognitionVehicleDetails.ownerName}{recognitionVehicleDetails.ownerEmail && <small className="recognition-owner-email">{recognitionVehicleDetails.ownerEmail}</small>}</>
+                        ? <span className="recognition-owner-details"><strong>{recognitionVehicleDetails.ownerName}</strong>{recognitionVehicleDetails.ownerEmail && <small className="recognition-owner-email">{recognitionVehicleDetails.ownerEmail}</small>}</span>
                         : 'No linked account'}
                   </span>
                 </div>
@@ -806,7 +896,7 @@ export function Dashboard() {
                     {recognitionMatchedPayment ? (
                       <span className="text-green font-semibold">✓ Paid ({recognitionMatchedPayment.payment_method})</span>
                     ) : recognitionMatchedSession?.concept === 'A' ? (
-                      <span className="text-yellow font-semibold">● Requires public app payment before exit</span>
+                      <span className="text-yellow font-semibold">Requires Payment</span>
                     ) : recognitionMatchedSession?.status === 'active' ? (
                       <span className="text-yellow font-semibold">● Payment Pending</span>
                     ) : (
@@ -864,7 +954,7 @@ export function Dashboard() {
                   className="clean-plate-input"
                   autoFocus
                   value={manualForm.plate}
-                  onChange={e => setManualForm({ ...manualForm, plate: e.target.value.toUpperCase().replace(/[^A-Z0-9 -]/g, '').slice(0, 8) })}
+                  onChange={e => setManualForm({ ...manualForm, plate: e.target.value.toUpperCase().replace(/[^A-Z0-9-]/g, '').slice(0, 8) })}
                   placeholder="e.g. ABC 1234"
                   maxLength={8}
                 />
@@ -982,7 +1072,7 @@ export function Dashboard() {
                           <span>Paid ({sessionPayment?.payment_method?.toUpperCase() || 'PAID'})</span>
                         </>
                       ) : selectedExitSession.concept === 'A' ? (
-                        <span>● Requires public app payment</span>
+                        <span>Requires Payment</span>
                       ) : (
                         <span>● Payment Pending</span>
                       )}
@@ -1014,7 +1104,7 @@ export function Dashboard() {
                   </div>
 
                   {/* If NOT paid yet, show Manual Payment Section */}
-                  {!isSessionPaid && selectedExitSession.concept !== 'A' && (
+                  {!isSessionPaid && !selectedExitSession.app_user_id && (selectedExitSession.concept !== 'A' || allowManualExit) && calculateExitDetails(selectedExitSession).totalAmount > 0 && (
                     <div className="exit-payment-action-box">
                       <div className="pay-method-row">
                         <label>Payment Method:</label>
@@ -1023,9 +1113,7 @@ export function Dashboard() {
                           value={exitPaymentMethod}
                           onChange={e => setExitPaymentMethod(e.target.value as PaymentMethod)}
                         >
-                          <option value="cash">Cash</option>
-                          <option value="gcash">GCash</option>
-                          <option value="card">Card</option>
+                          {enabledPaymentMethods.map(method => <option key={method} value={method}>{method === 'gcash' ? 'GCash' : method === 'card' ? 'Credit/Debit' : 'Cash'}</option>)}
                         </select>
                       </div>
                       <button
@@ -1038,13 +1126,21 @@ export function Dashboard() {
                     </div>
                   )}
 
-                  {selectedExitSession.concept === 'A' && !isSessionPaid && (
+                  {selectedExitSession.app_user_id && (
+                    <div className="exit-payment-action-box">
+                      <div className="pay-method-row">The linked wallet is charged automatically when this exit is completed. Negative balances are allowed.</div>
+                    </div>
+                  )}
+
+                  {selectedExitSession.concept === 'A' && !isSessionPaid && !allowManualExit && calculateExitDetails(selectedExitSession).totalAmount > 0 && (
                     <div className="exit-payment-action-box">
                       <div className="pay-method-row" style={{ color: '#fbbf24' }}>
-                        Public guest payment must be completed in the public app before this vehicle can exit.
+                        Complete this payment in the public app before exit.
                       </div>
                     </div>
                   )}
+
+                  {calculateExitDetails(selectedExitSession).totalAmount === 0 && <div className="exit-payment-action-box"><div className="pay-method-row">No fee is due during the grace period.</div></div>}
                 </div>
               )}
 

@@ -21,6 +21,8 @@
 import * as ort from 'onnxruntime-web';
 import Tesseract from 'tesseract.js';
 import { logActivity, supabase } from '@/lib/supabase';
+import { settleRegisteredSessionWallet } from '@/lib/wallet';
+import { calculateBillableHours, calculateParkingFee } from '@/lib/parkingFees';
 
 // ============================================================
 // CONSTANTS
@@ -1186,7 +1188,12 @@ export class EntranceProcessor {
       // 3. REAL-TIME INSTANT STREAM SCANNING:
       if (plateDetections.length > 0 || vehicleDetections.length > 0) {
         const topPlate = plateDetections[0];
-        const topVehicle = vehicleDetections[0];
+        const topVehicle = vehicleDetections.find(detection => detection.vehicleType !== null) || null;
+        const personOnlyFrame = vehicleDetections.some(detection => detection.className.toLowerCase() === 'person') && !topVehicle;
+        if (personOnlyFrame || (!topPlate && !topVehicle)) {
+          if (this._status !== 'scanning') this.setStatus('scanning');
+          return;
+        }
 
         let bestCrop: HTMLCanvasElement | null = null;
         if (topPlate) {
@@ -1388,10 +1395,11 @@ export class EntranceProcessor {
 
   private async lookupVehicle(plate: string): Promise<{ isPrivate: boolean; appUserId: string | null }> {
     try {
+      const normalizedPlate = plate.toUpperCase().replace(/[\s-]+/g, '');
       const { data } = await supabase
         .from('vehicles')
         .select('app_user_id')
-        .eq('plate_number', plate)
+        .eq('normalized_plate_number', normalizedPlate)
         .limit(1);
 
       if (data && data.length > 0 && data[0].app_user_id) {
@@ -1528,6 +1536,11 @@ export class ExitProcessor {
     try {
       await this.plateReader.initialize();
       try {
+        await this.detector.loadModel();
+      } catch (err) {
+        console.warn('[ExitProcessor] Vehicle classifier unavailable; using plate detector only:', err);
+      }
+      try {
         await this.plateDetector.loadModel();
         console.log('[ExitProcessor] Dedicated plate detector loaded');
       } catch {
@@ -1587,6 +1600,22 @@ export class ExitProcessor {
     if (!frame) return;
 
     try {
+      const vehicleDetections = this.detector.isLoaded
+        ? await this.detector.detect(frame.imageData, 0.25)
+        : [];
+      this._detections = vehicleDetections;
+      this.detectionCallbacks.forEach(cb => cb(vehicleDetections));
+
+      const recognizedVehicle = vehicleDetections.some(detection => detection.vehicleType !== null);
+      const personOnlyFrame = vehicleDetections.some(detection => detection.className.toLowerCase() === 'person') && !recognizedVehicle;
+      if (personOnlyFrame) {
+        this._plateDetections = [];
+        this.plateDetectionsCallbacks.forEach(cb => cb([]));
+        this.frameCallbacks.forEach(cb => cb());
+        if (this._status !== 'scanning') this.setStatus('scanning');
+        return;
+      }
+
       let plateDetections: PlateDetection[] = [];
       if (this.plateDetector.isLoaded) {
         plateDetections = await this.plateDetector.detect(frame.imageData, 0.25);
@@ -1599,7 +1628,7 @@ export class ExitProcessor {
         this.setStatus('detected');
       }
 
-      if (!this.triggerCooldown && !this._isProcessing && plateDetections.length > 0) {
+      if (!this.triggerCooldown && !this._isProcessing && plateDetections.length > 0 && (!vehicleDetections.length || recognizedVehicle)) {
         const topPlate = plateDetections[0];
         const bestCrop = cropDetectedPlate(frame.canvas, topPlate.bbox);
 
@@ -1689,43 +1718,44 @@ export class ExitProcessor {
 
       const session = sessions[0];
       const exitTime = new Date();
-      const entryTime = new Date(session.entry_time);
-      const durationMs = exitTime.getTime() - entryTime.getTime();
-      const durationHours = Math.max(0.5, Math.ceil((durationMs / (1000 * 60 * 60)) * 2) / 2);
-
       const rateKey = session.vehicle_type === 'motorcycle' ? 'hourly_rate_motorcycle' : 'hourly_rate_car';
       const { data: settingsData } = await supabase
         .from('settings')
-        .select('value')
-        .eq('key', rateKey)
-        .limit(1);
-
-      const hourlyRate = settingsData && settingsData.length > 0 ? Number(settingsData[0].value) : (session.vehicle_type === 'motorcycle' ? 25 : 50);
-      const totalAmount = durationHours * hourlyRate;
-
-      await supabase
-        .from('parking_sessions')
-        .update({
-          status: 'completed',
-          exit_time: exitTime.toISOString(),
-          exit_camera: 'Webcam Exit',
-        })
-        .eq('id', session.id);
+        .select('key, value')
+        .in('key', [rateKey, 'grace_period_minutes']);
+      const settings = Object.fromEntries((settingsData || []).map(row => [row.key, row.value]));
+      const hourlyRate = Number(settings[rateKey]) || (session.vehicle_type === 'motorcycle' ? 25 : 50);
+      const gracePeriodMinutes = Math.max(0, Number(settings.grace_period_minutes) || 0);
+      const durationHours = calculateBillableHours(session.entry_time, exitTime, gracePeriodMinutes);
+      const totalAmount = calculateParkingFee(durationHours, hourlyRate);
 
       const { data: countData } = await supabase.from('payments').select('id');
       const receiptNum = `RCP-${exitTime.getFullYear()}-${String((countData?.length || 0) + 1).padStart(4, '0')}`;
-
-      await supabase.from('payments').insert({
-        receipt_number: receiptNum,
-        plate_number: plateNumber,
-        session_id: session.id,
-        duration_hours: durationHours,
-        hourly_rate: hourlyRate,
-        total_amount: totalAmount,
-        payment_method: session.concept === 'B' ? 'gcash' : 'cash',
-        status: 'pending',
-        processed_by: 'Vision System',
-      });
+      let exitWasAllowed = true;
+      if (session.app_user_id) {
+        if (totalAmount > 0) await settleRegisteredSessionWallet(session, durationHours, hourlyRate, 'Vision System');
+      } else {
+        const { data: completedPayment } = await supabase.from('payments').select('id')
+          .eq('session_id', session.id).eq('status', 'completed').maybeSingle();
+        if (!completedPayment && totalAmount > 0) {
+          exitWasAllowed = false;
+          const { data: pendingPayment } = await supabase.from('payments').select('id')
+            .eq('session_id', session.id).eq('status', 'pending').maybeSingle();
+          if (!pendingPayment) {
+            await supabase.from('payments').insert({
+              receipt_number: receiptNum,
+              plate_number: plateNumber,
+              session_id: session.id,
+              duration_hours: durationHours,
+              hourly_rate: hourlyRate,
+              total_amount: totalAmount,
+              payment_method: 'cash',
+              status: 'pending',
+              processed_by: 'Vision System',
+            });
+          }
+        }
+      }
 
       await supabase.from('plate_recognitions').insert({
         plate_number: plateNumber,
@@ -1734,6 +1764,21 @@ export class ExitProcessor {
         confidence,
         camera_name: 'Webcam Exit',
       });
+
+      if (!exitWasAllowed) {
+        await supabase.from('notifications').insert({
+          type: 'warning',
+          title: `Payment Required: ${plateNumber}`,
+          message: `Exit scan detected for ${plateNumber}. Complete payment before leaving. Amount due: ₱${totalAmount.toFixed(2)}.`,
+        });
+        return null;
+      }
+
+      await supabase.from('parking_sessions').update({
+        status: 'completed',
+        exit_time: exitTime.toISOString(),
+        exit_camera: 'Webcam Exit',
+      }).eq('id', session.id);
 
       if (session.slot_id) {
         await supabase

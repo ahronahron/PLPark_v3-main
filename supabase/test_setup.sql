@@ -13,6 +13,7 @@
 --   7. 20260922090000_admin_auth_rls.sql
 --   8. 20261009090000_mobile_account_vehicle_fields.sql
 --   9. 20261009110000_prevent_duplicate_active_sessions.sql
+--   10. 20261009120000_wallet_transaction_history.sql
 --
 -- Original migration files were not modified.
 -- Storage recap + dashboard steps are at the bottom (section 8).
@@ -193,6 +194,53 @@ CREATE POLICY "anon_update_payments" ON payments FOR UPDATE TO anon, authenticat
 DROP POLICY IF EXISTS "anon_delete_payments" ON payments;
 CREATE POLICY "anon_delete_payments" ON payments FOR DELETE TO anon, authenticated USING (true);
 
+CREATE TABLE IF NOT EXISTS wallet_transactions (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  app_user_id uuid NOT NULL REFERENCES app_users(id) ON DELETE CASCADE,
+  session_id uuid REFERENCES parking_sessions(id) ON DELETE SET NULL,
+  payment_id uuid REFERENCES payments(id) ON DELETE SET NULL,
+  transaction_type text NOT NULL CHECK (transaction_type IN ('top_up', 'deduction')),
+  amount numeric(12,2) NOT NULL,
+  balance_after numeric(12,2) NOT NULL,
+  description text,
+  created_at timestamptz NOT NULL DEFAULT now()
+);
+ALTER TABLE wallet_transactions ENABLE ROW LEVEL SECURITY;
+GRANT SELECT, INSERT, UPDATE, DELETE ON wallet_transactions TO anon, authenticated;
+CREATE POLICY anon_full_access_wallet_transactions ON wallet_transactions FOR ALL TO anon USING (true) WITH CHECK (true);
+CREATE POLICY authenticated_full_access_wallet_transactions ON wallet_transactions FOR ALL TO authenticated USING (true) WITH CHECK (true);
+
+CREATE OR REPLACE FUNCTION public.apply_wallet_transaction(
+  p_app_user_id uuid,
+  p_amount numeric,
+  p_transaction_type text,
+  p_session_id uuid,
+  p_payment_id uuid,
+  p_description text
+) RETURNS numeric
+LANGUAGE plpgsql SECURITY DEFINER SET search_path = public
+AS $$
+DECLARE
+  v_balance_after numeric(12,2);
+BEGIN
+  IF p_transaction_type NOT IN ('top_up', 'deduction') THEN
+    RAISE EXCEPTION 'Unsupported wallet transaction type';
+  END IF;
+  IF (p_transaction_type = 'top_up' AND p_amount <= 0)
+     OR (p_transaction_type = 'deduction' AND p_amount >= 0) THEN
+    RAISE EXCEPTION 'Wallet transaction amount has the wrong sign';
+  END IF;
+  UPDATE public.app_users SET wallet_balance = wallet_balance + p_amount
+  WHERE id = p_app_user_id RETURNING wallet_balance INTO v_balance_after;
+  IF NOT FOUND THEN RAISE EXCEPTION 'App user not found'; END IF;
+  INSERT INTO public.wallet_transactions (app_user_id, session_id, payment_id, transaction_type, amount, balance_after, description)
+  VALUES (p_app_user_id, p_session_id, p_payment_id, p_transaction_type, p_amount, v_balance_after, p_description);
+  RETURN v_balance_after;
+END;
+$$;
+REVOKE ALL ON FUNCTION public.apply_wallet_transaction(uuid, numeric, text, uuid, uuid, text) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION public.apply_wallet_transaction(uuid, numeric, text, uuid, uuid, text) TO anon, authenticated;
+
 CREATE TABLE IF NOT EXISTS notifications (
   id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
   type text NOT NULL DEFAULT 'info',
@@ -250,6 +298,8 @@ CREATE INDEX IF NOT EXISTS idx_parking_sessions_plate ON parking_sessions(plate_
 CREATE INDEX IF NOT EXISTS idx_parking_sessions_status ON parking_sessions(status);
 CREATE INDEX IF NOT EXISTS idx_plate_recognitions_created ON plate_recognitions(created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_payments_created ON payments(created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_wallet_transactions_user_created ON wallet_transactions(app_user_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_wallet_transactions_session ON wallet_transactions(session_id);
 CREATE INDEX IF NOT EXISTS idx_parking_slots_status ON parking_slots(status);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_vehicles_normalized_plate_unique ON vehicles(normalized_plate_number);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_parking_sessions_one_active_plate ON parking_sessions(normalized_plate_number) WHERE status = 'active';
@@ -263,7 +313,7 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_parking_sessions_one_active_plate ON parki
 
 BEGIN;
 
-TRUNCATE TABLE activity_logs, notifications, payments, parking_sessions, plate_recognitions, cameras, parking_slots, vehicles, app_users, users, settings RESTART IDENTITY CASCADE;
+TRUNCATE TABLE activity_logs, notifications, wallet_transactions, payments, parking_sessions, plate_recognitions, cameras, parking_slots, vehicles, app_users, users, settings RESTART IDENTITY CASCADE;
 
 INSERT INTO users (full_name, username, role, status, email, last_login)
 VALUES ('Administrator', 'admin', 'admin', 'active', 'admin@parking.local', now())

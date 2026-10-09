@@ -1,5 +1,6 @@
 import { useEffect, useState, useCallback } from 'react';
 import { supabase, type ParkingSession, type Payment, type VehicleType } from '@/lib/supabase';
+import { calculateBillableHours, calculateParkingFee } from '@/lib/parkingFees';
 
 /* ============================================================
  * PLPark Mobile App — User Side
@@ -44,12 +45,22 @@ interface AvailableSlot {
   status: string;
 }
 
+interface WalletTransaction {
+  id: string;
+  transaction_type: 'top_up' | 'deduction';
+  amount: number;
+  balance_after: number;
+  description: string | null;
+  created_at: string;
+}
+
 /** Settings structure parsed from Supabase settings table */
 interface Settings {
   hourly_rate_car: number;
   hourly_rate_motorcycle: number;
   max_capacity_cars: number;
   max_capacity_motorcycles: number;
+  grace_period_minutes: number;
   currency: string;
   payment_methods: string[];
 }
@@ -132,11 +143,13 @@ export function MobileApp() {
   const [activeSession, setActiveSession] = useState<ParkingSession | null>(null);
   const [searchPlate, setSearchPlate] = useState('');
   const [searchedSession, setSearchedSession] = useState<ParkingSession | null>(null);
+  const [searchedSessionPaid, setSearchedSessionPaid] = useState(false);
   const [searchedPlateImage, setSearchedPlateImage] = useState<string | null>(null);
-  const [searchedPayments, setSearchedPayments] = useState<Payment[]>([]);
-  const [settings, setSettings] = useState<Settings>({ hourly_rate_car: 50, hourly_rate_motorcycle: 25, max_capacity_cars: 30, max_capacity_motorcycles: 20, currency: '₱', payment_methods: ['cash', 'gcash', 'card'] });
+  const [walletTransactions, setWalletTransactions] = useState<WalletTransaction[]>([]);
+  const [settings, setSettings] = useState<Settings>({ hourly_rate_car: 50, hourly_rate_motorcycle: 25, max_capacity_cars: 30, max_capacity_motorcycles: 20, grace_period_minutes: 0, currency: '₱', payment_methods: ['cash', 'gcash', 'card'] });
   const [toast, setToast] = useState<{ msg: string; type: 'success' | 'error' | 'info' } | null>(null);
   const [loading, setLoading] = useState(false);
+  const [showLogoutConfirmation, setShowLogoutConfirmation] = useState(false);
 
   /**
    * showToast — Triggers transient onscreen feedback banners on the phone layout.
@@ -165,33 +178,53 @@ export function MobileApp() {
    * @param userId — Account owner AppUser ID
    */
   const loadUserData = useCallback(async (userId: string) => {
-    const [{ data: v }, { data: s }] = await Promise.all([
-      supabase.from('vehicles').select('*').eq('app_user_id', userId),
-      supabase.from('parking_sessions').select('*').eq('app_user_id', userId).eq('status', 'active').maybeSingle(),
-    ]);
-    setVehicles(v || []);
-    setActiveSession(s as ParkingSession | null);
+    const { data: registeredVehicles } = await supabase.from('vehicles').select('*').eq('app_user_id', userId);
+    let { data: session } = await supabase.from('parking_sessions').select('*')
+      .eq('app_user_id', userId).eq('status', 'active').order('entry_time', { ascending: false }).limit(1).maybeSingle();
+
+    if (!session && registeredVehicles?.length) {
+      const normalizedPlates = registeredVehicles.map(vehicle => normalizePlate(vehicle.plate_number));
+      const { data: plateMatchedSession } = await supabase.from('parking_sessions').select('*')
+        .in('normalized_plate_number', normalizedPlates).eq('status', 'active')
+        .order('entry_time', { ascending: false }).limit(1).maybeSingle();
+      session = plateMatchedSession;
+
+      if (session && !session.app_user_id) {
+        const { error } = await supabase.from('parking_sessions')
+          .update({ app_user_id: userId, concept: 'B' }).eq('id', session.id);
+        if (!error) session = { ...session, app_user_id: userId, concept: 'B' };
+      }
+    }
+
+    setVehicles(registeredVehicles || []);
+    setActiveSession(session as ParkingSession | null);
   }, []);
 
   /**
    * searchPlateNumber — Performs plate queries for public search (Concept A).
    *
    * Validates: plate formatting.
-   * Fetches: active parking session matching query plus last 5 payment records.
+  * Fetches: only the current active session and its latest available snapshot.
    */
   const searchPlateNumber = async () => {
     if (!searchPlate.trim()) { showToast('Enter your plate number', 'error'); return; }
     if (!/^[A-Za-z0-9 -]{2,12}$/.test(searchPlate.trim())) { showToast('Enter a valid plate number', 'error'); return; }
     setLoading(true);
-    const plate = searchPlate.toUpperCase().trim();
-    const [{ data: session }, { data: pays }, { data: recognitions }, { data: vehicle }] = await Promise.all([
-      supabase.from('parking_sessions').select('*').eq('plate_number', plate).eq('status', 'active').maybeSingle(),
-      supabase.from('payments').select('*').eq('plate_number', plate).order('created_at', { ascending: false }).limit(5),
-      supabase.from('plate_recognitions').select('image_url').eq('plate_number', plate).not('image_url', 'is', null).order('created_at', { ascending: false }).limit(1),
-      supabase.from('vehicles').select('image_url').eq('plate_number', plate).maybeSingle(),
+    const plate = normalizePlate(searchPlate);
+    const plateLabel = searchPlate.toUpperCase().trim();
+    const [{ data: session }, { data: recognitions }, { data: vehicle }] = await Promise.all([
+      supabase.from('parking_sessions').select('*').eq('normalized_plate_number', plate).eq('status', 'active').maybeSingle(),
+      supabase.from('plate_recognitions').select('image_url').eq('plate_number', plateLabel).not('image_url', 'is', null).order('created_at', { ascending: false }).limit(1),
+      supabase.from('vehicles').select('image_url').eq('normalized_plate_number', plate).maybeSingle(),
     ]);
     setSearchedSession(session as ParkingSession | null);
-    setSearchedPayments((pays as Payment[]) || []);
+    if (session) {
+      const { data: payment } = await supabase.from('payments').select('id')
+        .eq('session_id', session.id).eq('status', 'completed').maybeSingle();
+      setSearchedSessionPaid(Boolean(payment));
+    } else {
+      setSearchedSessionPaid(false);
+    }
     setSearchedPlateImage(session?.image_url || recognitions?.[0]?.image_url || vehicle?.image_url || null);
     setScreen('searchResult');
     setLoading(false);
@@ -243,10 +276,28 @@ export function MobileApp() {
         if (payload.eventType === 'UPDATE') setParkingSlots(prev => prev.map(slot => slot.id === payload.new.id ? { ...slot, ...payload.new } as AvailableSlot : slot));
         if (payload.eventType === 'DELETE') setParkingSlots(prev => prev.filter(slot => slot.id !== payload.old.id));
       })
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'parking_sessions' }, () => { void loadParkingAvailability(); })
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'parking_sessions' }, payload => {
+        void loadParkingAvailability();
+        const changedSession = payload.eventType === 'DELETE' ? payload.old : payload.new;
+        if (changedSession.app_user_id === user.id) void loadUserData(user.id);
+      })
+      .on('postgres_changes', { event: 'UPDATE', schema: 'public', table: 'app_users', filter: `id=eq.${user.id}` }, payload => {
+        setUser(current => current ? { ...current, wallet_balance: Number(payload.new.wallet_balance) } : current);
+      })
       .subscribe();
     return () => { void supabase.removeChannel(channel); };
-  }, [user, loadParkingAvailability]);
+  }, [user, loadParkingAvailability, loadUserData]);
+
+  useEffect(() => {
+    if (!user || screen !== 'dashboard') return;
+    const refreshSession = () => { void loadUserData(user.id); };
+    const intervalId = window.setInterval(refreshSession, 8000);
+    window.addEventListener('focus', refreshSession);
+    return () => {
+      window.clearInterval(intervalId);
+      window.removeEventListener('focus', refreshSession);
+    };
+  }, [user?.id, screen, loadUserData]);
 
   const ensureAppUser = async (authUser: { id: string; email?: string; user_metadata: Record<string, any> }) => {
     const metadata = authUser.user_metadata || {};
@@ -390,6 +441,7 @@ export function MobileApp() {
    */
   const logout = async () => {
     await supabase.auth.signOut();
+    setShowLogoutConfirmation(false);
     setUser(null);
     setVehicles([]);
     setParkingSlots([]);
@@ -417,7 +469,7 @@ export function MobileApp() {
       return;
     }
     const payload = {
-      plate_number: vehicleForm.plate.toUpperCase().trim(),
+      plate_number: vehicleForm.plate.toUpperCase().replace(/\s+/g, '').trim(),
       vehicle_type: vehicleForm.type,
       make: vehicleForm.make.trim().toUpperCase(),
       color: vehicleForm.color.trim().toUpperCase(),
@@ -465,25 +517,17 @@ export function MobileApp() {
    */
   const paySession = async (session: ParkingSession, method: string) => {
     if (!session) return;
+    const { data: existingPayment } = await supabase.from('payments').select('id')
+      .eq('session_id', session.id).eq('status', 'completed').maybeSingle();
+    if (existingPayment) { showToast('This session has already been paid.', 'info'); return; }
     const rate = session.vehicle_type === 'car' ? settings.hourly_rate_car : settings.hourly_rate_motorcycle;
-    const durationMs = Date.now() - new Date(session.entry_time).getTime();
-    const hours = Math.max(0.5, durationMs / 3600000);
-    const total = Math.round(hours * rate * 100) / 100;
-    
-    // Deduct from wallet first if using Concept B registered balance
-    if (user && method === 'wallet') {
-      if (user.wallet_balance < total) {
-        showToast('Insufficient wallet balance. Please top up.', 'error');
-        return;
-      }
-      const newBal = Math.max(0, user.wallet_balance - total);
-      const { error: balErr } = await supabase.from('app_users').update({ wallet_balance: newBal }).eq('id', user.id);
-      if (balErr) { showToast('Wallet deduction failed', 'error'); return; }
-      setUser({ ...user, wallet_balance: newBal });
-    }
+    const hours = calculateBillableHours(session.entry_time, Date.now(), settings.grace_period_minutes);
+    const total = calculateParkingFee(hours, rate);
+    if (total <= 0) { showToast('No parking fee is due during the grace period.', 'info'); return; }
+    const newWalletBalance = user && method === 'wallet' ? Number(user.wallet_balance) - total : null;
 
     const receipt = `RCP-${Date.now().toString().slice(-6)}`;
-    const { error: payErr } = await supabase.from('payments').insert({
+    const { data: payment, error: payErr } = await supabase.from('payments').insert({
       receipt_number: receipt,
       plate_number: session.plate_number,
       session_id: session.id,
@@ -493,9 +537,25 @@ export function MobileApp() {
       payment_method: method,
       status: 'completed',
       processed_by: 'mobile-app',
-    });
+    }).select('id').single();
 
     if (payErr) { showToast('Payment failed', 'error'); return; }
+    if (newWalletBalance !== null && user) {
+      const { data: walletBalance, error: balanceError } = await supabase.rpc('apply_wallet_transaction', {
+        p_app_user_id: user.id,
+        p_amount: -total,
+        p_transaction_type: 'deduction',
+        p_session_id: session.id,
+        p_payment_id: payment.id,
+        p_description: `Parking fee for ${session.plate_number}`,
+      });
+      if (balanceError) {
+        await supabase.from('payments').delete().eq('receipt_number', receipt);
+        showToast('Wallet deduction failed', 'error');
+        return;
+      }
+      setUser({ ...user, wallet_balance: Number(walletBalance) });
+    }
     await supabase.from('parking_sessions').update({ status: 'completed', exit_time: new Date().toISOString() }).eq('id', session.id);
 
     setActiveSession(null);
@@ -507,16 +567,32 @@ export function MobileApp() {
   /** Form states for top-ups */
   const [topUpAmount, setTopUpAmount] = useState('');
 
+  useEffect(() => {
+    if (!user || screen !== 'wallet') return;
+    supabase.from('wallet_transactions').select('id, transaction_type, amount, balance_after, description, created_at')
+      .eq('app_user_id', user.id).order('created_at', { ascending: false })
+      .then(({ data }) => setWalletTransactions((data as WalletTransaction[]) || []));
+  }, [user?.id, screen]);
+
   /**
    * topUpWallet — Updates registered account wallet_balance columns.
    */
   const topUpWallet = async () => {
     const amt = parseFloat(topUpAmount);
     if (!amt || amt <= 0 || !user) { showToast('Enter a valid amount', 'error'); return; }
-    const newBal = user.wallet_balance + amt;
-    const { error } = await supabase.from('app_users').update({ wallet_balance: newBal }).eq('id', user.id);
+    const { data: newBal, error } = await supabase.rpc('apply_wallet_transaction', {
+      p_app_user_id: user.id,
+      p_amount: amt,
+      p_transaction_type: 'top_up',
+      p_session_id: null,
+      p_payment_id: null,
+      p_description: 'Wallet top-up',
+    });
     if (error) { showToast('Top-up failed', 'error'); return; }
     setUser({ ...user, wallet_balance: newBal });
+    const { data } = await supabase.from('wallet_transactions').select('id, transaction_type, amount, balance_after, description, created_at')
+      .eq('app_user_id', user.id).order('created_at', { ascending: false });
+    setWalletTransactions((data as WalletTransaction[]) || []);
     setTopUpAmount('');
     showToast(`Wallet topped up by ${settings.currency}${amt.toFixed(2)}`, 'success');
   };
@@ -726,22 +802,25 @@ export function MobileApp() {
                     <div className="m-session-row">
                       <span className="m-session-label">Estimated Cost</span>
                       <span className="m-session-value m-session-cost">
-                        {currency}{(Math.max(0.5, (Date.now() - new Date(searchedSession.entry_time).getTime()) / 3600000) * (searchedSession.vehicle_type === 'car' ? settings.hourly_rate_car : settings.hourly_rate_motorcycle)).toFixed(2)}
+                        {currency}{calculateParkingFee(calculateBillableHours(searchedSession.entry_time, Date.now(), settings.grace_period_minutes), searchedSession.vehicle_type === 'car' ? settings.hourly_rate_car : settings.hourly_rate_motorcycle).toFixed(2)}
                       </span>
                     </div>
                   </div>
 
-                  <div className="m-pay-section">
+                  {searchedSession.concept === 'A' && !searchedSession.app_user_id && !searchedSessionPaid && calculateBillableHours(searchedSession.entry_time, Date.now(), settings.grace_period_minutes) > 0 && <div className="m-pay-section">
                     <h2 className="m-section-title">Pay Now</h2>
                     <div className="m-pay-methods">
-                      {settings.payment_methods.map(method => (
+                      {(['cash', 'gcash', 'card'] as const).map(method => (
                         <button key={method} className="m-pay-method" onClick={() => paySession(searchedSession, method)}>
                           <span className="m-pay-method-label">{method === 'gcash' ? 'GCash' : method === 'card' ? 'Card' : 'Cash'}</span>
                           <span className="m-pay-method-arrow">{IArrow(16)}</span>
                         </button>
                       ))}
                     </div>
-                  </div>
+                  </div>}
+                  {searchedSessionPaid && <div className="m-auto-charge-note">Payment already recorded for this session.</div>}
+                  {searchedSession.concept === 'A' && !searchedSession.app_user_id && calculateBillableHours(searchedSession.entry_time, Date.now(), settings.grace_period_minutes) === 0 && <div className="m-auto-charge-note">No parking fee is due during the grace period.</div>}
+                  {searchedSession.app_user_id && <div className="m-auto-charge-note">This registered session is charged to the linked wallet when the vehicle exits.</div>}
                 </>
               ) : (
                 <div className="m-empty-state">
@@ -752,23 +831,6 @@ export function MobileApp() {
                 </div>
               )}
 
-              {searchedPayments.length > 0 && (
-                <div className="m-history-section">
-                  <h2 className="m-section-title">Payment History</h2>
-                  {searchedPayments.map(p => (
-                    <div key={p.id} className="m-history-item">
-                      <div className="m-history-left">
-                        <span className="m-history-receipt">{IReceipt(16)}</span>
-                        <div>
-                          <div className="m-history-amount">{currency}{p.total_amount.toFixed(2)}</div>
-                          <div className="m-history-meta">{p.receipt_number} · {formatTime(p.created_at)}</div>
-                        </div>
-                      </div>
-                      <span className={`m-history-status m-status-${p.status}`}>{p.status}</span>
-                    </div>
-                  ))}
-                </div>
-              )}
             </div>
           )}
 
@@ -783,7 +845,7 @@ export function MobileApp() {
                     <div className="m-dash-name">{user.full_name.split(' ')[0]}</div>
                   </div>
                 </div>
-                <button className="m-dash-logout" onClick={logout}>{ILogout(18)}</button>
+                <button className="m-dash-logout" aria-label="Log out" title="Log out" onClick={() => setShowLogoutConfirmation(true)}>{ILogout(18)}</button>
               </div>
 
               {/* Wallet balance */}
@@ -822,12 +884,10 @@ export function MobileApp() {
                   <div className="m-session-row">
                     <span className="m-session-label">Cost So Far</span>
                     <span className="m-session-value m-session-cost">
-                      {currency}{(Math.max(0.5, (Date.now() - new Date(activeSession.entry_time).getTime()) / 3600000) * (activeSession.vehicle_type === 'car' ? settings.hourly_rate_car : settings.hourly_rate_motorcycle)).toFixed(2)}
+                      {currency}{calculateParkingFee(calculateBillableHours(activeSession.entry_time, Date.now(), settings.grace_period_minutes), activeSession.vehicle_type === 'car' ? settings.hourly_rate_car : settings.hourly_rate_motorcycle).toFixed(2)}
                     </span>
                   </div>
-                  <button className="m-btn m-btn-primary m-btn-full" onClick={() => paySession(activeSession, 'wallet')}>
-                    Pay with Wallet ({currency}{user.wallet_balance.toFixed(2)})
-                  </button>
+                  {activeSession.app_user_id && <div className="m-auto-charge-note">Parking fee is automatically charged to your wallet when you exit.</div>}
                 </div>
               ) : (
                 <div className="m-no-session">
@@ -840,21 +900,20 @@ export function MobileApp() {
               <section className="m-slot-section">
                 <div className="m-preview-header m-slot-preview-header">
                   <h2 className="m-section-title">Parking Availability</h2>
-                  <div className="m-slot-header-actions">
-                    <span className="m-live-indicator"><span />LIVE</span>
-                    <div className="m-slot-filters" role="group" aria-label="Filter parking slots by vehicle type">
-                      <button type="button" className={slotFilter === 'all' ? 'active' : ''} aria-label="Show all slots" title="All slots" aria-pressed={slotFilter === 'all'} onClick={() => setSlotFilter('all')}>{IAllSlots(16)}</button>
-                      <button type="button" className={slotFilter === 'car' ? 'active' : ''} aria-label="Show car slots" title="Car slots" aria-pressed={slotFilter === 'car'} onClick={() => setSlotFilter('car')}>{ICar(17)}</button>
-                      <button type="button" className={slotFilter === 'motorcycle' ? 'active' : ''} aria-label="Show motorcycle slots" title="Motorcycle slots" aria-pressed={slotFilter === 'motorcycle'} onClick={() => setSlotFilter('motorcycle')}>{IBike(17)}</button>
-                    </div>
-                  </div>
+                  <span className="m-live-indicator"><span />LIVE</span>
                 </div>
-                <div className="m-peak-hours">
-                  <span className="m-peak-label">Peak hours</span>
-                  {peakHours.length > 0
-                    ? peakHours.map(hour => <span key={hour} className={`m-peak-chip ${peakHourNow ? 'is-current' : ''}`}>{formatHour(hour)}</span>)
-                    : <span className="m-peak-empty">No peak data yet</span>}
-                  {peakHourNow && <span className="m-peak-now">PEAK NOW</span>}
+                <div className="m-slot-control-row">
+                  <div className="m-peak-hours">
+                    <span className="m-peak-label">Peak hours</span>
+                    {peakHours.length > 0
+                      ? peakHours.map(hour => <span key={hour} className={`m-peak-chip ${peakHourNow ? 'is-current' : ''}`}>{formatHour(hour)}</span>)
+                      : <span className="m-peak-empty">No peak data yet</span>}
+                  </div>
+                  <div className="m-slot-filters" role="group" aria-label="Filter parking slots by vehicle type">
+                    <button type="button" className={slotFilter === 'all' ? 'active' : ''} aria-label="Show all slots" title="All slots" aria-pressed={slotFilter === 'all'} onClick={() => setSlotFilter('all')}>{IAllSlots(16)}</button>
+                    <button type="button" className={slotFilter === 'car' ? 'active' : ''} aria-label="Show car slots" title="Car slots" aria-pressed={slotFilter === 'car'} onClick={() => setSlotFilter('car')}>{ICar(17)}</button>
+                    <button type="button" className={slotFilter === 'motorcycle' ? 'active' : ''} aria-label="Show motorcycle slots" title="Motorcycle slots" aria-pressed={slotFilter === 'motorcycle'} onClick={() => setSlotFilter('motorcycle')}>{IBike(17)}</button>
+                  </div>
                 </div>
                 {filteredParkingSlots.length > 0 ? (
                   <div className="m-slot-grid">
@@ -864,8 +923,7 @@ export function MobileApp() {
                           <strong>{slot.slot_id}</strong>
                           <span className="m-slot-type">{slot.vehicle_type}</span>
                         </div>
-                        <span className="m-slot-status">{slot.status}</span>
-                        {peakHourNow && <span className="m-slot-peak-mark">Peak period</span>}
+                        {slot.status !== 'available' && <span className="m-slot-status">{slot.status}</span>}
                       </div>
                     ))}
                   </div>
@@ -908,7 +966,7 @@ export function MobileApp() {
               <form className="m-add-vehicle" onSubmit={event => { event.preventDefault(); void saveVehicle(); }}>
                 <div className="m-field">
                   <label>Plate Number</label>
-                  <input className="m-uppercase" value={vehicleForm.plate} onChange={e => setVehicleForm({ ...vehicleForm, plate: e.target.value.toUpperCase() })} placeholder="ABC 1234" required />
+                  <input className="m-uppercase" value={vehicleForm.plate} onChange={e => setVehicleForm({ ...vehicleForm, plate: e.target.value.toUpperCase().replace(/\s+/g, '') })} placeholder="ABC1234" required />
                 </div>
                 <div className="m-field">
                   <label>Vehicle Type</label>
@@ -990,6 +1048,23 @@ export function MobileApp() {
                   Top Up {topUpAmount ? `${currency}${parseFloat(topUpAmount).toFixed(2)}` : ''}
                 </button>
               </form>
+              <section className="m-wallet-history">
+                <h2 className="m-section-title">Wallet Activity</h2>
+                {walletTransactions.length > 0 ? walletTransactions.map(transaction => (
+                  <div className="m-wallet-transaction" key={transaction.id}>
+                    <span className={`m-wallet-transaction-icon ${transaction.transaction_type}`}>
+                      {transaction.transaction_type === 'top_up' ? IPlus(16) : IReceipt(16)}
+                    </span>
+                    <span className="m-wallet-transaction-copy">
+                      <strong>{transaction.description || (transaction.transaction_type === 'top_up' ? 'Wallet top-up' : 'Parking payment')}</strong>
+                      <small>{formatTime(transaction.created_at)}</small>
+                    </span>
+                    <span className={`m-wallet-transaction-amount ${transaction.transaction_type}`}>
+                      {transaction.amount > 0 ? '+' : ''}{currency}{Number(transaction.amount).toFixed(2)}
+                    </span>
+                  </div>
+                )) : <p className="m-wallet-history-empty">No wallet activity yet.</p>}
+              </section>
             </div>
           )}
         </div>
@@ -1003,6 +1078,20 @@ export function MobileApp() {
               <div className="m-confirm-actions">
                 <button type="button" className="m-btn m-btn-ghost" onClick={() => setVehicleToDelete(null)}>Cancel</button>
                 <button type="button" className="m-btn m-confirm-danger" onClick={() => void deleteVehicle(vehicleToDelete)}>Remove Vehicle</button>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {showLogoutConfirmation && (
+          <div className="m-confirm-overlay" onClick={() => setShowLogoutConfirmation(false)}>
+            <div className="m-confirm-dialog" role="alertdialog" aria-modal="true" aria-labelledby="logout-title" onClick={event => event.stopPropagation()}>
+              <span className="m-confirm-icon">{ILogout(20)}</span>
+              <h2 id="logout-title">Log out of PLPark?</h2>
+              <p>Your account will remain saved on this device.</p>
+              <div className="m-confirm-actions">
+                <button type="button" className="m-btn m-btn-ghost" onClick={() => setShowLogoutConfirmation(false)}>Cancel</button>
+                <button type="button" className="m-btn m-confirm-danger" onClick={() => void logout()}>Log Out</button>
               </div>
             </div>
           </div>

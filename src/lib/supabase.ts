@@ -69,7 +69,7 @@ export type SlotStatus = 'available' | 'occupied' | 'reserved' | 'disabled';
 export type SessionStatus = 'active' | 'completed';
 
 /** Supported payment methods */
-export type PaymentMethod = 'cash' | 'gcash' | 'card';
+export type PaymentMethod = 'cash' | 'gcash' | 'card' | 'wallet';
 
 /** Payment transaction states */
 export type PaymentStatus = 'completed' | 'pending' | 'refunded' | 'failed';

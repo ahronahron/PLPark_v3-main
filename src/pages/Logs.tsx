@@ -10,11 +10,15 @@ import { useEffect, useState } from 'react';
 import {
   supabase,
   type User,
+  type AppUser,
+  type Vehicle,
   type Payment,
   type ParkingSession,
   type PaymentMethod,
   logActivity
 } from '@/lib/supabase';
+import { settleRegisteredSessionWallet } from '@/lib/wallet';
+import { calculateBillableHours, calculateParkingFee } from '@/lib/parkingFees';
 import {
   IconSearch,
   IconTrash,
@@ -36,19 +40,29 @@ export function Logs() {
   const [sessions, setSessions] = useState<ParkingSession[]>([]);
   const [payments, setPayments] = useState<Payment[]>([]);
   const [users, setUsers] = useState<User[]>([]);
+  const [appUsers, setAppUsers] = useState<AppUser[]>([]);
 
   /** Filtering */
   const [searchQuery, setSearchQuery] = useState('');
   const [statusFilter, setStatusFilter] = useState('all');
+  const [userTypeFilter, setUserTypeFilter] = useState<'all' | 'client' | 'user' | 'admin'>('all');
 
   /** Modals */
   const [viewSession, setViewSession] = useState<ParkingSession | null>(null);
   const [viewPayment, setViewPayment] = useState<Payment | null>(null);
   const [manageExitSession, setManageExitSession] = useState<ParkingSession | null>(null);
   const [exitConfirmSession, setExitConfirmSession] = useState<ParkingSession | null>(null);
+  const [viewClient, setViewClient] = useState<AppUser | null>(null);
+  const [clientVehicles, setClientVehicles] = useState<Vehicle[]>([]);
+  const [clientDetailTab, setClientDetailTab] = useState<'history' | 'payments'>('history');
 
   /** Manage Exit Modal State */
   const [exitPaymentMethod, setExitPaymentMethod] = useState<PaymentMethod>('cash');
+  const [allowManualExit, setAllowManualExit] = useState(false);
+  const [enabledPaymentMethods, setEnabledPaymentMethods] = useState<PaymentMethod[]>(['cash', 'gcash', 'card']);
+  const [gracePeriodMinutes, setGracePeriodMinutes] = useState(0);
+  const [hourlyRateCars, setHourlyRateCars] = useState(50);
+  const [hourlyRateMotos, setHourlyRateMotos] = useState(25);
   const [exitStatusMsg, setExitStatusMsg] = useState<{ msg: string; ok: boolean } | null>(null);
   const [isProcessingPayment, setIsProcessingPayment] = useState(false);
 
@@ -63,6 +77,15 @@ export function Logs() {
     supabase.from('parking_sessions').select('*').order('created_at', { ascending: false }).then(({ data }) => setSessions(data || []));
     supabase.from('payments').select('*').order('created_at', { ascending: false }).then(({ data }) => setPayments(data || []));
     supabase.from('users').select('*').order('created_at', { ascending: false }).then(({ data }) => setUsers(data || []));
+    supabase.from('app_users').select('*').order('created_at', { ascending: false }).then(({ data }) => setAppUsers(data || []));
+    supabase.from('settings').select('key, value').then(({ data }) => {
+      const settings = Object.fromEntries((data || []).map((row: any) => [row.key, row.value]));
+      setAllowManualExit(Boolean(settings.allow_manual_exit));
+      setEnabledPaymentMethods(Array.isArray(settings.payment_methods) ? settings.payment_methods as PaymentMethod[] : ['cash', 'gcash', 'card']);
+      setGracePeriodMinutes(Math.max(0, Number(settings.grace_period_minutes) || 0));
+      setHourlyRateCars(Number(settings.hourly_rate_car) || 50);
+      setHourlyRateMotos(Number(settings.hourly_rate_motorcycle) || 25);
+    });
   };
 
   useEffect(() => {
@@ -140,19 +163,26 @@ export function Logs() {
   // ============================================================
 
   const filteredSessions = sessions.filter(s => {
+    const owner = appUsers.find(appUser => appUser.id === s.app_user_id);
     const matchesSearch = !searchQuery.trim() ||
       s.plate_number.toLowerCase().includes(searchQuery.toLowerCase()) ||
       (s.slot_id && s.slot_id.toLowerCase().includes(searchQuery.toLowerCase())) ||
-      s.vehicle_type.toLowerCase().includes(searchQuery.toLowerCase());
+      s.vehicle_type.toLowerCase().includes(searchQuery.toLowerCase()) ||
+      (owner?.full_name.toLowerCase().includes(searchQuery.toLowerCase()) ?? false) ||
+      (owner?.email.toLowerCase().includes(searchQuery.toLowerCase()) ?? false);
     const matchesStatus = statusFilter === 'all' || s.status === statusFilter;
     return matchesSearch && matchesStatus;
   });
 
   const filteredPayments = payments.filter(p => {
+    const relatedSession = sessions.find(session => session.id === p.session_id);
+    const owner = appUsers.find(appUser => appUser.id === relatedSession?.app_user_id);
     const matchesSearch = !searchQuery.trim() ||
       p.plate_number.toLowerCase().includes(searchQuery.toLowerCase()) ||
       p.receipt_number.toLowerCase().includes(searchQuery.toLowerCase()) ||
-      p.payment_method.toLowerCase().includes(searchQuery.toLowerCase());
+      p.payment_method.toLowerCase().includes(searchQuery.toLowerCase()) ||
+      (owner?.full_name.toLowerCase().includes(searchQuery.toLowerCase()) ?? false) ||
+      (owner?.email.toLowerCase().includes(searchQuery.toLowerCase()) ?? false);
     const matchesStatus = statusFilter === 'all' || p.status === statusFilter;
     return matchesSearch && matchesStatus;
   });
@@ -163,14 +193,26 @@ export function Logs() {
     u.username.toLowerCase().includes(searchQuery.toLowerCase()) ||
     u.email.toLowerCase().includes(searchQuery.toLowerCase())
   );
+  const filteredAppUsers = appUsers.filter(appUser =>
+    !searchQuery.trim() ||
+    appUser.full_name.toLowerCase().includes(searchQuery.toLowerCase()) ||
+    appUser.email.toLowerCase().includes(searchQuery.toLowerCase()) ||
+    (appUser.phone || '').toLowerCase().includes(searchQuery.toLowerCase())
+  );
+
+  const openClientDetails = async (appUser: AppUser) => {
+    setViewClient(appUser);
+    setClientDetailTab('history');
+    const { data } = await supabase.from('vehicles').select('*').eq('app_user_id', appUser.id).order('created_at', { ascending: false });
+    setClientVehicles((data as Vehicle[]) || []);
+  };
 
   // Calculate duration & fee helper
   const calculateSessionDetails = (session: ParkingSession) => {
-    const entryDate = new Date(session.entry_time);
-    const exitDate = session.exit_time ? new Date(session.exit_time) : new Date();
-    const durationHours = Math.max(0.5, Math.ceil(((exitDate.getTime() - entryDate.getTime()) / 3600000) * 2) / 2);
-    const rate = session.vehicle_type === 'motorcycle' ? 25 : 50;
-    const totalAmount = durationHours * rate;
+    const endTime = session.exit_time || new Date();
+    const durationHours = calculateBillableHours(session.entry_time, endTime, gracePeriodMinutes);
+    const rate = session.vehicle_type === 'motorcycle' ? hourlyRateMotos : hourlyRateCars;
+    const totalAmount = calculateParkingFee(durationHours, rate);
     return { durationHours, rate, totalAmount };
   };
 
@@ -184,11 +226,27 @@ export function Logs() {
   /** Process payment in Manage Exit modal */
   const handleProcessPayment = async () => {
     if (!manageExitSession) return;
+    if (manageExitSession.app_user_id) {
+      setExitStatusMsg({ msg: 'This registered account will be charged automatically when the exit is completed.', ok: false });
+      return;
+    }
+    if (manageExitSession.concept === 'A' && !allowManualExit) {
+      setExitStatusMsg({ msg: 'Manual payment is disabled. This guest must pay through the public app.', ok: false });
+      return;
+    }
+    if (!enabledPaymentMethods.includes(exitPaymentMethod)) {
+      setExitStatusMsg({ msg: 'This payment gateway is disabled in Parking Handling settings.', ok: false });
+      return;
+    }
     setIsProcessingPayment(true);
     setExitStatusMsg(null);
 
     try {
       const { durationHours, rate, totalAmount } = calculateSessionDetails(manageExitSession);
+      if (totalAmount <= 0) {
+        setExitStatusMsg({ msg: 'No fee is due during the grace period.', ok: true });
+        return;
+      }
       const { data: countData } = await supabase.from('payments').select('id');
       const receiptNum = `RCP-${new Date().getFullYear()}-${String((countData?.length || 0) + 1).padStart(4, '0')}`;
 
@@ -231,7 +289,50 @@ export function Logs() {
     if (!exitConfirmSession) return;
 
     const session = exitConfirmSession;
+    const { durationHours, rate, totalAmount } = calculateSessionDetails(session);
+    if (session.concept === 'A' && totalAmount > 0) {
+      const { data: guestPayment, error } = await supabase.from('payments').select('id')
+        .eq('session_id', session.id).eq('status', 'completed').maybeSingle();
+      if (error || !guestPayment) {
+        if (!allowManualExit) {
+          setExitStatusMsg({ msg: 'Complete this guest payment in the public app before exit.', ok: false });
+          setExitConfirmSession(null);
+          return;
+        }
+        if (!enabledPaymentMethods.includes(exitPaymentMethod)) {
+          setExitStatusMsg({ msg: 'The selected manual payment method is disabled.', ok: false });
+          return;
+        }
+        const { data: countData } = await supabase.from('payments').select('id');
+        const receiptNum = `RCP-${new Date().getFullYear()}-${String((countData?.length || 0) + 1).padStart(4, '0')}`;
+        const { error: paymentError } = await supabase.from('payments').insert({
+          receipt_number: receiptNum,
+          plate_number: session.plate_number,
+          session_id: session.id,
+          duration_hours: durationHours,
+          hourly_rate: rate,
+          total_amount: totalAmount,
+          payment_method: exitPaymentMethod,
+          status: 'completed',
+          processed_by: 'Admin manual exit',
+        });
+        if (paymentError) {
+          setExitStatusMsg({ msg: `Payment error: ${paymentError.message}`, ok: false });
+          return;
+        }
+      }
+    }
     const exitTime = new Date().toISOString();
+
+    if (session.app_user_id) {
+      try {
+        await settleRegisteredSessionWallet(session, durationHours, rate, 'Logs manual exit');
+      } catch (walletError) {
+        setExitStatusMsg({ msg: walletError instanceof Error ? walletError.message : 'Wallet deduction failed; exit was not completed.', ok: false });
+        setExitConfirmSession(null);
+        return;
+      }
+    }
 
     await supabase.from('parking_sessions').update({
       status: 'completed',
@@ -301,6 +402,7 @@ export function Logs() {
         <thead>
           <tr>
             <th>Plate Number</th>
+            <th>Account</th>
             <th>Type</th>
             <th>Slot</th>
             <th>Entry Time</th>
@@ -313,9 +415,11 @@ export function Logs() {
         <tbody>
           {filteredSessions.map(s => {
             const hasPaid = payments.some(p => p.session_id === s.id && p.status === 'completed') || s.concept === 'B';
+            const owner = appUsers.find(appUser => appUser.id === s.app_user_id);
             return (
               <tr key={s.id} className="logs-interactive-row" onClick={() => setViewSession(s)}>
                 <td className="mono font-bold">{s.plate_number}</td>
+                <td>{owner ? <span className="log-owner-cell"><strong>{owner.full_name}</strong><small>{owner.email}</small></span> : 'Guest'}</td>
                 <td>
                   <span className="flex items-center gap-2">
                     {s.vehicle_type === 'car' ? <IconCar size={15} /> : <IconMotorcycle size={15} />}
@@ -382,7 +486,7 @@ export function Logs() {
               </tr>
             );
           })}
-          {filteredSessions.length === 0 && <tr><td colSpan={8} className="empty-state">No vehicle sessions found</td></tr>}
+          {filteredSessions.length === 0 && <tr><td colSpan={9} className="empty-state">No vehicle sessions found</td></tr>}
         </tbody>
       </table>
     </div>
@@ -420,6 +524,7 @@ export function Logs() {
           <tr>
             <th>Receipt No.</th>
             <th>Plate</th>
+            <th>Account</th>
             <th>Duration</th>
             <th>Amount</th>
             <th>Method</th>
@@ -429,87 +534,92 @@ export function Logs() {
           </tr>
         </thead>
         <tbody>
-          {filteredPayments.map(p => (
-            <tr key={p.id} className="logs-interactive-row" onClick={() => setViewPayment(p)}>
-              <td className="mono font-bold" style={{ color: 'var(--cursor-blue)' }}>{p.receipt_number}</td>
-              <td className="mono font-semibold">{p.plate_number}</td>
-              <td>{p.duration_hours}h</td>
-              <td className="font-bold">₱{Number(p.total_amount).toFixed(2)}</td>
-              <td><span className={`method-badge ${p.payment_method}`}>{p.payment_method}</span></td>
-              <td>{new Date(p.created_at).toLocaleString()}</td>
-              <td><span className={`status-badge ${p.status}`}>{p.status}</span></td>
-              <td onClick={e => e.stopPropagation()}>
-                <div className="row-actions">
-                  <button className="action-btn" title="View receipt details" onClick={() => setViewPayment(p)}>
-                    <IconView size={14} />
-                  </button>
-                  <button className="action-btn action-danger" title="Delete payment" onClick={() => deletePayment(p.id)}>
-                    <IconTrash size={14} />
-                  </button>
-                </div>
-              </td>
-            </tr>
-          ))}
-          {filteredPayments.length === 0 && <tr><td colSpan={8} className="empty-state">No payments found</td></tr>}
+          {filteredPayments.map(p => {
+            const relatedSession = sessions.find(session => session.id === p.session_id);
+            const owner = appUsers.find(appUser => appUser.id === relatedSession?.app_user_id);
+            return (
+              <tr key={p.id} className="logs-interactive-row" onClick={() => setViewPayment(p)}>
+                <td className="mono font-bold" style={{ color: 'var(--cursor-blue)' }}>{p.receipt_number}</td>
+                <td className="mono font-semibold">{p.plate_number}</td>
+                <td>{owner ? <span className="log-owner-cell"><strong>{owner.full_name}</strong><small>{owner.email}</small></span> : 'Guest'}</td>
+                <td>{p.duration_hours}h</td>
+                <td className="font-bold">₱{Number(p.total_amount).toFixed(2)}</td>
+                <td><span className={`method-badge ${p.payment_method}`}>{p.payment_method}</span></td>
+                <td>{new Date(p.created_at).toLocaleString()}</td>
+                <td><span className={`status-badge ${p.status}`}>{p.status}</span></td>
+                <td onClick={e => e.stopPropagation()}>
+                  <div className="row-actions">
+                    <button className="action-btn" title="View receipt details" onClick={() => setViewPayment(p)}><IconView size={14} /></button>
+                    <button className="action-btn action-danger" title="Delete payment" onClick={() => deletePayment(p.id)}><IconTrash size={14} /></button>
+                  </div>
+                </td>
+              </tr>
+            );
+          })}
+          {filteredPayments.length === 0 && <tr><td colSpan={9} className="empty-state">No payments found</td></tr>}
         </tbody>
       </table>
     </div>
   );
 
   /** 3. User Management view (Third Tab) */
-  const renderUsers = () => (
-    <div className="logs-content-section">
-      <div className="page-toolbar">
-        <div className="search-wrapper">
-          <IconSearch size={15} className="search-prefix" />
-          <input
-            className="search-input"
-            placeholder="Search users by name, username, or email..."
-            value={searchQuery}
-            onChange={e => setSearchQuery(e.target.value)}
-          />
-        </div>
-        <div className="toolbar-actions">
-          <button className="btn-primary" onClick={() => setIsAddUserModalOpen(true)}>
-            <IconPlus size={15} /> Add User
-          </button>
-        </div>
-      </div>
+  const renderUsers = () => {
+    const matchingStaff = filteredUsers.filter(staff => {
+      if (userTypeFilter === 'admin') return staff.role === 'admin';
+      if (userTypeFilter === 'user') return staff.role !== 'admin';
+      return userTypeFilter === 'all';
+    });
+    const matchingClients = userTypeFilter === 'all' || userTypeFilter === 'client' ? filteredAppUsers : [];
 
-      <table className="data-table logs-table logs-users-table">
-        <thead>
-          <tr>
-            <th>Name</th>
-            <th>Username</th>
-            <th>Role</th>
-            <th>Status</th>
-            <th>Email</th>
-            <th>Last Login</th>
-            <th>Actions</th>
-          </tr>
-        </thead>
-        <tbody>
-          {filteredUsers.map(u => (
-            <tr key={u.id}>
-              <td>{u.full_name}</td>
-              <td className="mono">{u.username}</td>
-              <td><span className={`role-badge ${u.role}`}>{u.role}</span></td>
-              <td><span className={`status-badge ${u.status}`}>{u.status}</span></td>
-              <td>{u.email}</td>
-              <td>{u.last_login ? new Date(u.last_login).toLocaleString() : 'Never'}</td>
-              <td>
-                <div className="row-actions">
-                  <button className="action-btn" title="Delete" onClick={() => deleteUser(u.id)}><IconTrash size={14} /></button>
-                  <button className="action-btn" title="Reset Password" onClick={() => alert('Password reset')}><IconKey size={14} /></button>
-                </div>
-              </td>
-            </tr>
-          ))}
-          {filteredUsers.length === 0 && <tr><td colSpan={7} className="empty-state">No users found</td></tr>}
-        </tbody>
-      </table>
-    </div>
-  );
+    return (
+      <div className="logs-content-section">
+        <div className="page-toolbar">
+          <div className="search-wrapper">
+            <IconSearch size={15} className="search-prefix" />
+            <input className="search-input" placeholder="Search by name, email, or phone..." value={searchQuery} onChange={e => setSearchQuery(e.target.value)} />
+          </div>
+          <div className="toolbar-actions">
+            <select className="logs-filter-select" value={userTypeFilter} onChange={e => setUserTypeFilter(e.target.value as typeof userTypeFilter)} aria-label="Filter accounts by type">
+              <option value="all">All Accounts</option>
+              <option value="client">Clients</option>
+              <option value="user">Users</option>
+              <option value="admin">Admins</option>
+            </select>
+            <button className="btn-primary" onClick={() => setIsAddUserModalOpen(true)}><IconPlus size={15} /> Add User</button>
+          </div>
+        </div>
+
+        <table className="data-table logs-table logs-users-table">
+          <thead><tr><th>Name</th><th>Account Type</th><th>Email</th><th>Phone</th><th>Balance</th><th>Status</th><th>Actions</th></tr></thead>
+          <tbody>
+            {matchingClients.map(appUser => (
+              <tr key={`client-${appUser.id}`} className="logs-interactive-row" onClick={() => void openClientDetails(appUser)}>
+                <td>{appUser.full_name}</td>
+                <td><span className="role-badge user">User</span></td>
+                <td>{appUser.email}</td>
+                <td>{appUser.phone || '—'}</td>
+                <td className="font-semibold">₱{Number(appUser.wallet_balance).toFixed(2)}</td>
+                <td><span className={`status-badge ${appUser.status}`}>{appUser.status}</span></td>
+                <td onClick={event => event.stopPropagation()}><button className="action-btn" title="View client details" onClick={() => void openClientDetails(appUser)}><IconView size={14} /></button></td>
+              </tr>
+            ))}
+            {matchingStaff.map(staff => (
+              <tr key={`staff-${staff.id}`}>
+                <td>{staff.full_name}</td>
+                <td><span className={`role-badge ${staff.role === 'admin' ? 'admin' : 'user'}`}>{staff.role === 'admin' ? 'Admin' : 'User'}</span></td>
+                <td>{staff.email}</td>
+                <td>—</td>
+                <td>—</td>
+                <td><span className={`status-badge ${staff.status}`}>{staff.status}</span></td>
+                <td><div className="row-actions"><button className="action-btn action-danger" title="Delete account" onClick={() => deleteUser(staff.id)}><IconTrash size={14} /></button></div></td>
+              </tr>
+            ))}
+            {matchingClients.length + matchingStaff.length === 0 && <tr><td colSpan={7} className="empty-state">No accounts found</td></tr>}
+          </tbody>
+        </table>
+      </div>
+    );
+  };
 
   return (
     <div className="payments-page">
@@ -587,6 +697,14 @@ export function Logs() {
                   <span className="cell-label">Calculated Fee</span>
                   <span className="cell-val font-bold text-blue">₱{calculateSessionDetails(viewSession).totalAmount.toFixed(2)}</span>
                 </div>
+                <div className="quick-look-cell">
+                  <span className="cell-label">Account Owner</span>
+                  <span className="cell-val">{appUsers.find(appUser => appUser.id === viewSession.app_user_id)?.full_name || 'Guest'}</span>
+                </div>
+                {viewSession.app_user_id && <div className="quick-look-cell">
+                  <span className="cell-label">Owner Email</span>
+                  <span className="cell-val">{appUsers.find(appUser => appUser.id === viewSession.app_user_id)?.email || '—'}</span>
+                </div>}
               </div>
 
               {/* Matched Payment info if any */}
@@ -653,6 +771,10 @@ export function Logs() {
                 <div className="quick-look-cell">
                   <span className="cell-label">Vehicle Plate</span>
                   <span className="cell-val mono font-bold">{viewPayment.plate_number}</span>
+                </div>
+                <div className="quick-look-cell">
+                  <span className="cell-label">Account Owner</span>
+                  <span className="cell-val">{appUsers.find(appUser => appUser.id === sessions.find(session => session.id === viewPayment.session_id)?.app_user_id)?.full_name || 'Guest'}</span>
                 </div>
                 <div className="quick-look-cell">
                   <span className="cell-label">Payment Method</span>
@@ -739,7 +861,13 @@ export function Logs() {
                   <span className="exit-total-amount">₱{calculateSessionDetails(manageExitSession).totalAmount.toFixed(2)}</span>
                 </div>
 
-                {!isManageSessionPaid && (
+                {manageExitSession.app_user_id && (
+                  <div className="exit-payment-action-box">
+                    <div className="pay-method-row">The linked wallet is charged automatically when this exit is completed. Negative balances are allowed.</div>
+                  </div>
+                )}
+
+                {!isManageSessionPaid && !manageExitSession.app_user_id && (manageExitSession.concept !== 'A' || allowManualExit) && calculateSessionDetails(manageExitSession).totalAmount > 0 && (
                   <div className="exit-payment-action-box">
                     <div className="pay-method-row">
                       <label>Payment Method:</label>
@@ -748,9 +876,7 @@ export function Logs() {
                         value={exitPaymentMethod}
                         onChange={e => setExitPaymentMethod(e.target.value as PaymentMethod)}
                       >
-                        <option value="cash">Cash</option>
-                        <option value="gcash">GCash</option>
-                        <option value="card">Card</option>
+                        {enabledPaymentMethods.map(method => <option key={method} value={method}>{method === 'gcash' ? 'GCash' : method === 'card' ? 'Credit/Debit' : 'Cash'}</option>)}
                       </select>
                     </div>
                     <button
@@ -761,6 +887,12 @@ export function Logs() {
                       {isProcessingPayment ? 'Processing...' : `Process Manual Payment (₱${calculateSessionDetails(manageExitSession).totalAmount.toFixed(2)})`}
                     </button>
                   </div>
+                )}
+                {manageExitSession.concept === 'A' && !isManageSessionPaid && !allowManualExit && calculateSessionDetails(manageExitSession).totalAmount > 0 && (
+                  <div className="exit-payment-action-box"><div className="pay-method-row">Complete this payment in the public app before exit.</div></div>
+                )}
+                {calculateSessionDetails(manageExitSession).totalAmount === 0 && (
+                  <div className="exit-payment-action-box"><div className="pay-method-row">No fee is due during the grace period.</div></div>
                 )}
               </div>
 
@@ -861,6 +993,69 @@ export function Logs() {
           </div>
         </div>
       )}
+
+      {viewClient && (() => {
+        const clientSessions = sessions.filter(session => session.app_user_id === viewClient.id);
+        const clientSessionIds = new Set(clientSessions.map(session => session.id));
+        const clientPayments = payments.filter(payment => payment.session_id && clientSessionIds.has(payment.session_id));
+        return (
+          <div className="modal-overlay" onClick={() => setViewClient(null)}>
+            <div className="modal-container client-account-modal" onClick={event => event.stopPropagation()}>
+              <div className="modal-header">
+                <div><h3>{viewClient.full_name}</h3><span className="role-badge user">User</span></div>
+                <button className="close-btn" onClick={() => setViewClient(null)}>×</button>
+              </div>
+              <div className="modal-body client-account-body">
+                <div className="quick-look-grid">
+                  <div className="quick-look-cell"><span className="cell-label">Email</span><span className="cell-val">{viewClient.email}</span></div>
+                  <div className="quick-look-cell"><span className="cell-label">Phone</span><span className="cell-val">{viewClient.phone || '—'}</span></div>
+                  <div className="quick-look-cell"><span className="cell-label">Current Balance</span><span className="cell-val font-bold">₱{Number(viewClient.wallet_balance).toFixed(2)}</span></div>
+                  <div className="quick-look-cell"><span className="cell-label">Times Parked</span><span className="cell-val">{clientSessions.length}</span></div>
+                </div>
+
+                <section className="client-detail-section client-vehicles-section">
+                  <h4>Registered Vehicles ({clientVehicles.length})</h4>
+                  {clientVehicles.length ? clientVehicles.map(vehicle => (
+                    <div className="client-vehicle-row" key={vehicle.id}>
+                      <span className="mono font-bold">{vehicle.plate_number}</span>
+                      <span>{[vehicle.make, vehicle.vehicle_type, vehicle.color].filter(Boolean).join(' · ')}</span>
+                    </div>
+                  )) : <p className="text-muted">No vehicles registered.</p>}
+                </section>
+
+                <div className="client-detail-tabs" role="tablist" aria-label="Client activity">
+                  <button type="button" role="tab" aria-selected={clientDetailTab === 'history'} className={clientDetailTab === 'history' ? 'active' : ''} onClick={() => setClientDetailTab('history')}>Parking History ({clientSessions.length})</button>
+                  <button type="button" role="tab" aria-selected={clientDetailTab === 'payments'} className={clientDetailTab === 'payments' ? 'active' : ''} onClick={() => setClientDetailTab('payments')}>Payments ({clientPayments.length})</button>
+                </div>
+
+                <section className="client-detail-tab-content" role="tabpanel">
+                  {clientDetailTab === 'history' ? (
+                    clientSessions.length ? clientSessions.map(session => (
+                      <div className="client-history-row" key={session.id}>
+                        {session.image_url ? <img src={session.image_url} alt={`Plate ${session.plate_number}`} /> : <span className="client-history-placeholder"><IconCar size={18} /></span>}
+                        <div className="client-history-copy">
+                          <strong className="mono">{session.plate_number}</strong>
+                          <small>{new Date(session.entry_time).toLocaleString()}</small>
+                          <small>{session.exit_time ? `Exited ${new Date(session.exit_time).toLocaleString()}` : 'Currently parked'}</small>
+                        </div>
+                        <span className={`status-badge ${session.status}`}>{session.status}</span>
+                      </div>
+                    )) : <p className="text-muted">No parking history.</p>
+                  ) : (
+                    clientPayments.length ? clientPayments.map(payment => (
+                      <div className="client-payment-row" key={payment.id}>
+                        <span><strong>{payment.receipt_number}</strong><small>{new Date(payment.created_at).toLocaleString()}</small></span>
+                        <span className="method-badge">{payment.payment_method}</span>
+                        <strong>₱{Number(payment.total_amount).toFixed(2)}</strong>
+                      </div>
+                    )) : <p className="text-muted">No linked payments.</p>
+                  )}
+                </section>
+              </div>
+            </div>
+          </div>
+        );
+      })()}
     </div>
   );
 }
