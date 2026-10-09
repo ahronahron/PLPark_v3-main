@@ -58,6 +58,14 @@ export function Dashboard() {
   const [cameraTab, setCameraTab] = useState<'entrance' | 'exit' | 'slot'>('entrance');
   const [maxCars, setMaxCars] = useState(30);
   const [maxMotos, setMaxMotos] = useState(20);
+  const [visitorEntryMode, setVisitorEntryMode] = useState(false);
+  const [guestReviewRequest, setGuestReviewRequest] = useState<{
+    plateNumber: string;
+    vehicleType: VehicleType;
+    color: string;
+    imageUrl: string;
+    confidence: number;
+  } | null>(null);
 
   /** Modals */
   const [isEntryModalOpen, setIsEntryModalOpen] = useState(false);
@@ -108,6 +116,7 @@ export function Dashboard() {
         const m = Object.fromEntries(data.map((r: any) => [r.key, r.value]));
         setMaxCars(Number(m.max_capacity_cars) || 30);
         setMaxMotos(Number(m.max_capacity_motorcycles) || 20);
+        setVisitorEntryMode(Boolean(m.visitor_entry_mode));
       }
     });
 
@@ -146,9 +155,20 @@ export function Dashboard() {
 
   /** Vision callbacks */
   const handleEntranceResult = useCallback((result: EntranceResult) => {
-    console.log('[Dashboard] Entrance detection:', result.plateNumber);
+    console.log('[Dashboard] Entrance detection:', result.plateNumber, 'guest=', !result.isPrivate, 'mode=', visitorEntryMode);
+
+    if (!result.isPrivate && !visitorEntryMode) {
+      setGuestReviewRequest({
+        plateNumber: result.plateNumber,
+        vehicleType: result.vehicleType,
+        color: result.color || 'Unknown',
+        imageUrl: result.plateSnapshotUrl || result.snapshotUrl || '',
+        confidence: result.confidence,
+      });
+    }
+
     refreshData();
-  }, [refreshData]);
+  }, [refreshData, visitorEntryMode]);
 
   const handleExitResult = useCallback((result: ExitResult) => {
     console.log('[Dashboard] Exit detection:', result.plateNumber, result.totalAmount);
@@ -180,6 +200,7 @@ export function Dashboard() {
       (selectedExitSession.concept === 'B' ? { status: 'completed', payment_method: 'wallet', receipt_number: 'APP-WALLET' } : null)
     : null;
   const isSessionPaid = Boolean(sessionPayment);
+  const requiresPublicAppPayment = selectedExitSession ? selectedExitSession.concept === 'A' && !isSessionPaid : false;
 
   // Calculate duration & fee for exit session
   const calculateExitDetails = (session: ParkingSession) => {
@@ -201,6 +222,48 @@ export function Dashboard() {
   // ============================================================
   // ACTION HANDLERS
   // ============================================================
+
+  const handleGuestApprovalDecision = async (allowEntry: boolean) => {
+    if (!guestReviewRequest) return;
+
+    if (allowEntry) {
+      const guestTime = new Date().toISOString();
+      const { error } = await supabase.from('parking_sessions').insert({
+        plate_number: guestReviewRequest.plateNumber,
+        vehicle_type: guestReviewRequest.vehicleType,
+        color: guestReviewRequest.color,
+        image_url: guestReviewRequest.imageUrl,
+        concept: 'A',
+        entry_camera: 'Admin Approval',
+        status: 'active',
+        entry_time: guestTime,
+      });
+
+      if (error) {
+        setExitStatus({ msg: 'Guest approval failed: ' + error.message, ok: false });
+        return;
+      }
+
+      await supabase.from('notifications').insert({
+        type: 'success',
+        title: `Guest Entry Approved: ${guestReviewRequest.plateNumber}`,
+        message: `Admin approved entry for ${guestReviewRequest.plateNumber}. Vehicle type: ${guestReviewRequest.vehicleType}; Color: ${guestReviewRequest.color}.`,
+        image_url: guestReviewRequest.imageUrl || null,
+      });
+      await logActivity('Approved guest entry', 'Vehicle Access', { plate_number: guestReviewRequest.plateNumber, approved: true });
+    } else {
+      await supabase.from('notifications').insert({
+        type: 'warning',
+        title: `Guest Entry Denied: ${guestReviewRequest.plateNumber}`,
+        message: `Admin denied entry for ${guestReviewRequest.plateNumber}. The vehicle must register before entry.`,
+        image_url: guestReviewRequest.imageUrl || null,
+      });
+      await logActivity('Denied guest entry', 'Vehicle Access', { plate_number: guestReviewRequest.plateNumber, approved: false });
+    }
+
+    setGuestReviewRequest(null);
+    refreshData();
+  };
 
   /** Handle Manual Entry Submit */
   const handleManualEntrySubmit = async () => {
@@ -259,6 +322,12 @@ export function Dashboard() {
   /** Process Manual Payment for the selected exit session */
   const handleProcessManualPayment = async () => {
     if (!selectedExitSession) return;
+
+    if (selectedExitSession.concept === 'A' && !sessionPayment) {
+      setExitStatus({ msg: 'Guest session payment must be completed via the public app before exit.', ok: false });
+      return;
+    }
+
     setIsProcessingPayment(true);
     setExitStatus(null);
 
@@ -299,12 +368,24 @@ export function Dashboard() {
   /** Trigger Exit Confirmation Popup */
   const handlePromptExitConfirm = () => {
     if (!selectedExitSession) return;
+
+    if (selectedExitSession.concept === 'A' && !isSessionPaid) {
+      setExitStatus({ msg: 'Guest exit is blocked until payment is completed through the public app.', ok: false });
+      return;
+    }
+
     setExitConfirmSession(selectedExitSession);
   };
 
   /** Complete Manual Exit */
   const handleConfirmExit = async () => {
     if (!exitConfirmSession) return;
+
+    if (exitConfirmSession.concept === 'A' && !payments.some(p => p.session_id === exitConfirmSession.id && p.status === 'completed')) {
+      setExitStatus({ msg: 'Guest entry must be paid through the public app before exit is allowed.', ok: false });
+      setExitConfirmSession(null);
+      return;
+    }
 
     const session = exitConfirmSession;
     const exitTime = new Date().toISOString();
@@ -545,6 +626,52 @@ export function Dashboard() {
       </div>
 
       {/* ===== 1. RECOGNITION DETAILS QUICK LOOK MODAL ===== */}
+      {guestReviewRequest && (
+        <div className="modal-overlay" onClick={() => setGuestReviewRequest(null)}>
+          <div className="modal-container quick-look-modal" onClick={e => e.stopPropagation()}>
+            <div className="modal-header">
+              <div className="quick-look-title-bar">
+                <span className="rec-badge warning" style={{ fontSize: '11px', padding: '3px 8px' }}>GUEST REVIEW</span>
+                <h3>Unregistered Vehicle Detected</h3>
+              </div>
+              <button className="close-btn" onClick={() => setGuestReviewRequest(null)}>×</button>
+            </div>
+            <div className="modal-body">
+              <div className="quick-look-banner">
+                {guestReviewRequest.imageUrl ? (
+                  <img src={guestReviewRequest.imageUrl} alt="Guest plate snapshot" className="quick-look-image" />
+                ) : (
+                  <div className="quick-look-icon-placeholder"><IconCar size={36} /></div>
+                )}
+                <div className="quick-look-plate-info">
+                  <div className="quick-look-plate">{guestReviewRequest.plateNumber}</div>
+                  <div className="quick-look-type-row">
+                    <span className="quick-look-type">{guestReviewRequest.vehicleType}</span>
+                    <span className="quick-look-conf">Confidence: {guestReviewRequest.confidence}%</span>
+                  </div>
+                  <div className="quick-look-cam">Vehicle color: <strong>{guestReviewRequest.color}</strong></div>
+                </div>
+              </div>
+              <div className="quick-look-grid">
+                <div className="quick-look-cell">
+                  <span className="cell-label">Access Status</span>
+                  <span className="cell-val" style={{ color: '#f59e0b' }}>Guest — requires registration or admin approval</span>
+                </div>
+                <div className="quick-look-cell">
+                  <span className="cell-label">Entry Rule</span>
+                  <span className="cell-val">Automatic Entry is disabled. Entry blocked until approved.</span>
+                </div>
+              </div>
+              <div className="clean-modal-actions" style={{ marginTop: '16px' }}>
+                <button className="btn-secondary" onClick={() => setGuestReviewRequest(null)}>Close</button>
+                <button className="btn-danger-action" onClick={() => handleGuestApprovalDecision(false)}>Deny Entry</button>
+                <button className="btn-primary" onClick={() => handleGuestApprovalDecision(true)}>Allow Entry</button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
       {selectedRecognition && (
         <div className="modal-overlay" onClick={() => setSelectedRecognition(null)}>
           <div className="modal-container quick-look-modal" onClick={e => e.stopPropagation()}>
@@ -590,6 +717,16 @@ export function Dashboard() {
                   <span className="cell-val">{new Date(selectedRecognition.created_at).toLocaleString()}</span>
                 </div>
                 <div className="quick-look-cell">
+                  <span className="cell-label">Access Type</span>
+                  <span className="cell-val">
+                    {recognitionMatchedSession?.app_user_id || recognitionMatchedSession?.concept === 'B' ? (
+                      <span className="text-green font-semibold">Registered User</span>
+                    ) : (
+                      <span className="text-yellow font-semibold">Guest</span>
+                    )}
+                  </span>
+                </div>
+                <div className="quick-look-cell">
                   <span className="cell-label">Assigned Slot</span>
                   <span className="cell-val">{recognitionMatchedSession?.slot_id || 'None'}</span>
                 </div>
@@ -608,6 +745,8 @@ export function Dashboard() {
                   <span className="cell-val">
                     {recognitionMatchedPayment ? (
                       <span className="text-green font-semibold">✓ Paid ({recognitionMatchedPayment.payment_method})</span>
+                    ) : recognitionMatchedSession?.concept === 'A' ? (
+                      <span className="text-yellow font-semibold">● Requires public app payment before exit</span>
                     ) : recognitionMatchedSession?.status === 'active' ? (
                       <span className="text-yellow font-semibold">● Payment Pending</span>
                     ) : (
@@ -782,6 +921,8 @@ export function Dashboard() {
                           <IconCheck size={13} />
                           <span>Paid ({sessionPayment?.payment_method?.toUpperCase() || 'PAID'})</span>
                         </>
+                      ) : selectedExitSession.concept === 'A' ? (
+                        <span>● Requires public app payment</span>
                       ) : (
                         <span>● Payment Pending</span>
                       )}
@@ -813,7 +954,7 @@ export function Dashboard() {
                   </div>
 
                   {/* If NOT paid yet, show Manual Payment Section */}
-                  {!isSessionPaid && (
+                  {!isSessionPaid && selectedExitSession.concept !== 'A' && (
                     <div className="exit-payment-action-box">
                       <div className="pay-method-row">
                         <label>Payment Method:</label>
@@ -834,6 +975,14 @@ export function Dashboard() {
                       >
                         {isProcessingPayment ? 'Processing...' : `Process Manual Payment (₱${calculateExitDetails(selectedExitSession).totalAmount.toFixed(2)})`}
                       </button>
+                    </div>
+                  )}
+
+                  {selectedExitSession.concept === 'A' && !isSessionPaid && (
+                    <div className="exit-payment-action-box">
+                      <div className="pay-method-row" style={{ color: '#fbbf24' }}>
+                        Public guest payment must be completed in the public app before this vehicle can exit.
+                      </div>
                     </div>
                   )}
                 </div>

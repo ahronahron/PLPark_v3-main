@@ -403,24 +403,43 @@ export function Settings() {
               </div>
             </div>
             <div className="payment-gateway-panel">
-              <h3 style={{ fontSize: '13px', fontWeight: 600, marginBottom: '12px' }}>Payment Gateways</h3>
-              <div className="settings-form gateway-form" style={{ maxWidth: '480px', margin: '0 auto' }}>
-                {['cash', 'gcash', 'card'].map(method => (
-                  <div key={method} className="toggle-row">
-                    <span className="toggle-label" style={{ textTransform: 'capitalize' }}>
-                      {method === 'gcash' ? 'GCash' : method === 'card' ? 'Credit/Debit Card' : 'Cash'}
-                    </span>
-                    <label className="toggle-switch">
-                      <input type="checkbox" defaultChecked={(settings.payment_methods || []).includes(method)}
-                        onChange={e => {
-                          const current = settings.payment_methods || [];
-                          const updated = e.target.checked ? [...current, method] : current.filter((m: string) => m !== method);
-                          saveSetting('payment_methods', updated);
-                        }} />
-                      <span className="toggle-slider" />
-                    </label>
+              <h3 style={{ fontSize: '13px', fontWeight: 600, marginBottom: '12px' }}>Entry Control</h3>
+              <div className="settings-form gateway-form" style={{ maxWidth: '540px', margin: '0 auto' }}>
+                <div className="toggle-row">
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: '4px' }}>
+                    <span className="toggle-label">Visitor Entry Mode</span>
+                    <small style={{ color: '#8aa0b8' }}>
+                      {Boolean(settings.visitor_entry_mode) ? 'On — unregistered plates are allowed as guests.' : 'Off — unregistered plates must register before entry.'}
+                    </small>
                   </div>
-                ))}
+                  <label className="toggle-switch">
+                    <input
+                      type="checkbox"
+                      checked={Boolean(settings.visitor_entry_mode)}
+                      onChange={e => saveSetting('visitor_entry_mode', e.target.checked)}
+                    />
+                    <span className="toggle-slider" />
+                  </label>
+                </div>
+                <div style={{ marginTop: '14px', borderTop: '1px solid rgba(148,163,184,0.2)', paddingTop: '12px' }}>
+                  <h3 style={{ fontSize: '13px', fontWeight: 600, marginBottom: '12px' }}>Payment Gateways</h3>
+                  {['cash', 'gcash', 'card'].map(method => (
+                    <div key={method} className="toggle-row">
+                      <span className="toggle-label" style={{ textTransform: 'capitalize' }}>
+                        {method === 'gcash' ? 'GCash' : method === 'card' ? 'Credit/Debit Card' : 'Cash'}
+                      </span>
+                      <label className="toggle-switch">
+                        <input type="checkbox" defaultChecked={(settings.payment_methods || []).includes(method)}
+                          onChange={e => {
+                            const current = settings.payment_methods || [];
+                            const updated = e.target.checked ? [...current, method] : current.filter((m: string) => m !== method);
+                            saveSetting('payment_methods', updated);
+                          }} />
+                        <span className="toggle-slider" />
+                      </label>
+                    </div>
+                  ))}
+                </div>
               </div>
             </div>
           </div>

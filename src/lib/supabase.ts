@@ -249,6 +249,7 @@ export interface Notification {
   type: 'success' | 'info' | 'warning' | 'error';
   title: string;
   message: string | null;
+  image_url?: string | null;
   is_read: boolean;
   created_at: string;
 }

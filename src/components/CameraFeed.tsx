@@ -63,6 +63,7 @@ export function CameraFeed({ mode, onEntranceResult, onExitResult, deviceId }: C
   const [lastPlate, setLastPlate] = useState<string>('');
   const [lastColor, setLastColor] = useState<string>('');
   const [lastType, setLastType] = useState<string>('');
+  const [lastAccessState, setLastAccessState] = useState<string>('');
   const [lastExitInfo, setLastExitInfo] = useState<{ plate: string; amount: number; duration: number } | null>(null);
   const [error, setError] = useState<string>('');
 
@@ -225,6 +226,7 @@ export function CameraFeed({ mode, onEntranceResult, onExitResult, deviceId }: C
           setLastPlate(result.plateNumber);
           setLastColor(result.color);
           setLastType(result.vehicleType);
+          setLastAccessState(result.isPrivate ? 'Registered' : 'Guest');
           onEntranceResult?.(result);
         });
         processor.onFrame(() => drawOverlay());
@@ -360,7 +362,8 @@ export function CameraFeed({ mode, onEntranceResult, onExitResult, deviceId }: C
           <div className="camera-plate-result">
             <div className="camera-plate-number">{lastPlate}</div>
             <div className="camera-plate-details">
-              {lastType && <span className="camera-plate-type">{lastType}</span>}
+              {lastAccessState && <span className="camera-plate-type">{lastAccessState}</span>}
+              {!lastAccessState && lastType && <span className="camera-plate-type">{lastType}</span>}
               {lastColor && <span className="camera-plate-color">{lastColor}</span>}
             </div>
           </div>

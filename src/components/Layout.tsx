@@ -106,7 +106,7 @@ export function Sidebar({
  */
 interface TopbarProps {
   title: string;
-  notifications: { id: string; type: string; title: string; message: string | null; created_at: string; is_read: boolean }[];
+  notifications: { id: string; type: string; title: string; message: string | null; image_url?: string | null; created_at: string; is_read: boolean }[];
   onMarkAllRead: () => void;
 }
 
@@ -181,6 +181,9 @@ export function Topbar({ title, notifications, onMarkAllRead }: TopbarProps) {
               <button className="close-btn" onClick={() => setSelectedNotification(null)} title="Close notification">×</button>
             </div>
             <div className="modal-body notification-detail-body">
+              {selectedNotification.image_url && (
+                <img src={selectedNotification.image_url} alt="Notification plate snapshot" className="quick-look-image" style={{ maxHeight: 180, objectFit: 'cover' }} />
+              )}
               <p>{selectedNotification.message || 'No additional details were provided.'}</p>
               <span className="text-muted text-xs">{new Date(selectedNotification.created_at).toLocaleString()}</span>
               <div className="clean-modal-actions">

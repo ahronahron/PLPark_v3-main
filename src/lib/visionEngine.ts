@@ -20,7 +20,7 @@
 
 import * as ort from 'onnxruntime-web';
 import Tesseract from 'tesseract.js';
-import { supabase } from '@/lib/supabase';
+import { logActivity, supabase } from '@/lib/supabase';
 
 // ============================================================
 // CONSTANTS
@@ -1263,6 +1263,45 @@ export class EntranceProcessor {
     }
   }
 
+  private async getVisitorEntryMode(): Promise<boolean> {
+    try {
+      const { data } = await supabase
+        .from('settings')
+        .select('value')
+        .eq('key', 'visitor_entry_mode')
+        .maybeSingle();
+
+      const value = data?.value;
+      if (typeof value === 'boolean') return value;
+      if (typeof value === 'string') return value.toLowerCase() === 'true';
+      return false;
+    } catch (err) {
+      console.warn('[EntranceProcessor] Could not read visitor entry mode:', err);
+      return false;
+    }
+  }
+
+  private async createGuestReviewAlert(result: EntranceResult): Promise<void> {
+    try {
+      const imageUrl = result.plateSnapshotUrl || result.snapshotUrl || null;
+      await supabase.from('notifications').insert({
+        type: 'warning',
+        title: `Guest Vehicle Requires Approval: ${result.plateNumber}`,
+        message: `Vehicle ${result.plateNumber} is not registered in the system and Automatic Entry mode is currently off. The driver must register first or request approval from an admin before entering. Vehicle type: ${result.vehicleType}; Color: ${result.color}; Confidence: ${result.confidence}%.`,
+        image_url: imageUrl,
+      });
+      await logActivity('Blocked guest entry', 'Vehicle Access', {
+        plate_number: result.plateNumber,
+        vehicle_type: result.vehicleType,
+        color: result.color,
+        confidence: result.confidence,
+        visitor_entry_mode: false,
+      });
+    } catch (err) {
+      console.error('[EntranceProcessor] Guest review alert failed:', err);
+    }
+  }
+
   private async saveEntranceRecord(
     fullCanvas: HTMLCanvasElement,
     winningCrop: HTMLCanvasElement,
@@ -1357,6 +1396,23 @@ export class EntranceProcessor {
 
   private async createSession(result: EntranceResult): Promise<void> {
     try {
+      const visitorModeEnabled = await this.getVisitorEntryMode();
+
+      await supabase.from('plate_recognitions').insert({
+        plate_number: result.plateNumber,
+        vehicle_type: result.vehicleType,
+        direction: 'entry',
+        confidence: result.confidence,
+        camera_name: 'Webcam Entrance',
+        image_url: result.plateSnapshotUrl || result.snapshotUrl,
+      });
+
+      if (!result.isPrivate && !visitorModeEnabled) {
+        await this.createGuestReviewAlert(result);
+        console.log(`[EntranceProcessor] Guest entry blocked for ${result.plateNumber} because visitor mode is off.`);
+        return;
+      }
+
       await supabase.from('parking_sessions').insert({
         plate_number: result.plateNumber,
         vehicle_type: result.vehicleType,
@@ -1369,19 +1425,11 @@ export class EntranceProcessor {
         app_user_id: result.appUserId,
       });
 
-      await supabase.from('plate_recognitions').insert({
-        plate_number: result.plateNumber,
-        vehicle_type: result.vehicleType,
-        direction: 'entry',
-        confidence: result.confidence,
-        camera_name: 'Webcam Entrance',
-        image_url: result.plateSnapshotUrl,
-      });
-
       await supabase.from('notifications').insert({
         type: result.isPrivate ? 'info' : 'success',
         title: `Vehicle Entered: ${result.plateNumber}`,
         message: `${result.vehicleType.charAt(0).toUpperCase() + result.vehicleType.slice(1)} (${result.color}) — ${result.isPrivate ? 'Private (Registered)' : 'Public (Guest)'}`,
+        image_url: result.plateSnapshotUrl || result.snapshotUrl || null,
       });
 
       console.log(`[EntranceProcessor] Session created for ${result.plateNumber}`);

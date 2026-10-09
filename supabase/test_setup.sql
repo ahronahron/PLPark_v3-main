@@ -192,6 +192,7 @@ CREATE TABLE IF NOT EXISTS notifications (
   type text NOT NULL DEFAULT 'info',
   title text NOT NULL,
   message text,
+  image_url text,
   is_read boolean NOT NULL DEFAULT false,
   created_at timestamptz DEFAULT now()
 );
