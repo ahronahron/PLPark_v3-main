@@ -1780,6 +1780,8 @@ export interface SlotAOIConfig {
   dbId: string;
   /** Ordered polygon vertices as [x, y] pairs, normalized 0-1 */
   polygon: [number, number][];
+  /** Allowed vehicle type from parking_slots, e.g. "car" or "motorcycle" */
+  vehicleType?: string;
 }
 
 /**
@@ -1939,7 +1941,16 @@ export class SlotMonitorProcessor {
   private statusCallbacks: ((status: PipelineStatus) => void)[] = [];
   private detectionCallbacks: ((detections: Detection[]) => void)[] = [];
   private slotChangeCallbacks: ((results: SlotDetectionResult[]) => void)[] = [];
+  private slotStateCallbacks: ((slots: any[]) => void)[] = [];
   private frameCallbacks: (() => void)[] = [];
+
+  // IP Camera overrides
+  private ipMode = false;
+  private ipConfigSent = 0;
+  private lastSentConfigJson = '';
+  private isPollingIp = false;
+  private slotMonitorUrl = import.meta.env.VITE_SLOT_MONITOR_URL || 'http://127.0.0.1:8766';
+  private cameraConfig: any = null;
 
   constructor() {
     this.cameraManager = new CameraManager();
@@ -1956,6 +1967,7 @@ export class SlotMonitorProcessor {
   onStatusChange(cb: (status: PipelineStatus) => void): void { this.statusCallbacks.push(cb); }
   onDetections(cb: (detections: Detection[]) => void): void { this.detectionCallbacks.push(cb); }
   onSlotChange(cb: (results: SlotDetectionResult[]) => void): void { this.slotChangeCallbacks.push(cb); }
+  onSlotState(cb: (slots: any[]) => void): void { this.slotStateCallbacks.push(cb); }
   onFrame(cb: () => void): void { this.frameCallbacks.push(cb); }
 
   private setStatus(status: PipelineStatus): void {
@@ -1967,6 +1979,10 @@ export class SlotMonitorProcessor {
    * initialize — Loads the YOLO model for vehicle detection.
    */
   async initialize(): Promise<void> {
+    if (this.ipMode) {
+      this.setStatus('idle');
+      return;
+    }
     this.setStatus('loading');
     try {
       await this.detector.loadModel();
@@ -1981,7 +1997,14 @@ export class SlotMonitorProcessor {
   /**
    * startCamera — Opens the camera stream and attaches to a video element.
    */
-  async startCamera(deviceId: string, videoEl: HTMLVideoElement): Promise<void> {
+  async startCamera(deviceId: string, videoEl: HTMLVideoElement, cameraConfig?: any): Promise<void> {
+    if (cameraConfig?.connection_method === 'ip') {
+      this.ipMode = true;
+      this.cameraConfig = cameraConfig;
+      this.ipConfigSent = 0;
+      return;
+    }
+    this.ipMode = false;
     await this.cameraManager.startStream(deviceId, videoEl);
   }
 
@@ -1993,6 +2016,7 @@ export class SlotMonitorProcessor {
    */
   setSlots(slots: SlotAOIConfig[]): void {
     this.slots = slots;
+    this.ipConfigSent = 0; // force resend to IP backend
 
     // Initialize occupancy state for new slots, preserve existing state
     const existing = new Map(this.occupancyState);
@@ -2049,6 +2073,11 @@ export class SlotMonitorProcessor {
    * 5. Commits confirmed changes to Supabase
    */
   private async processFrame(): Promise<void> {
+    if (this.ipMode) {
+      await this.processIpBackend();
+      return;
+    }
+    
     if (!this.detector.isLoaded || !this.cameraManager.isActive) return;
 
     try {
@@ -2115,6 +2144,167 @@ export class SlotMonitorProcessor {
     }
   }
 
+  private ipErrorCallbacks: ((err: string) => void)[] = [];
+
+  onIpError(cb: (err: string) => void): void { this.ipErrorCallbacks.push(cb); }
+
+  private async processIpBackend() {
+    if (this.isPollingIp) return;
+    this.isPollingIp = true;
+    try {
+      const now = Date.now();
+      let url = this.cameraConfig?.ip_address || '';
+      if (url && !url.startsWith('http')) url = 'http://' + url;
+
+      // Extract comparable slot configuration (ids, polygons, and vehicleType)
+      const comparableSlots = this.slots.map(s => ({
+        slotId: s.slotId,
+        dbId: s.dbId,
+        polygon: s.polygon,
+        vehicleType: s.vehicleType
+      }));
+      const configObj = {
+        camera: { url, mode: 'mjpeg' },
+        slots: comparableSlots
+      };
+      const currentConfigJson = JSON.stringify(configObj);
+      const configChanged = currentConfigJson !== this.lastSentConfigJson;
+      const keepAliveDue = (now - this.ipConfigSent) > 30000;
+
+      // Only POST /config when url or slots actually change or keep-alive is due (every 30s)
+      // Never send an empty slots list if we have active slots
+      if ((configChanged || keepAliveDue) && url) {
+        console.log(`[SlotMonitor IP] POSTing /config (${comparableSlots.length} slots sent, changed=${configChanged}, keepAlive=${keepAliveDue})`);
+        comparableSlots.forEach(s => {
+          console.log(`[SlotMonitor IP] Slot "${s.slotId}" (dbId: ${s.dbId}) sent with vehicleType: "${s.vehicleType}"`);
+        });
+        this.ipConfigSent = now;
+        this.lastSentConfigJson = currentConfigJson;
+        await fetch(`${this.slotMonitorUrl}/config`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(configObj)
+        }).then(res => console.log('[SlotMonitor IP] /config response:', res.status))
+          .catch(e => {
+            console.warn('[SlotMonitor IP] Config error', e);
+            this.ipErrorCallbacks.forEach(cb => cb(`IP camera config error: ${e.message || e}`));
+          });
+      }
+      
+      const res = await fetch(`${this.slotMonitorUrl}/state`);
+      if (!res.ok) {
+        throw new Error(`Failed to fetch /state: ${res.status} ${res.statusText}`);
+      }
+      const data = await res.json();
+      
+      // Notify listeners of live slot states
+      const slotsData: any[] = data.slots || [];
+      this.slotStateCallbacks.forEach(cb => cb(slotsData));
+
+      // Map live vehicle detections to our Detection interface
+      const rawDetections: any[] = data.detections || [];
+      const mappedDetections: Detection[] = rawDetections.map((d: any) => ({
+        classId: d.type === 'motorcycle' ? 3 : 2,
+        className: d.type || 'car',
+        confidence: d.confidence || 0.8,
+        bbox: d.bbox || [0, 0, 0, 0],
+        vehicleType: d.type || 'car',
+        color: d.color || null,
+      }));
+      this._detections = mappedDetections;
+      this.detectionCallbacks.forEach(cb => cb(mappedDetections));
+
+      // Match each slot in this.slots to an entry in /state
+      // Match by slotId, dbId, or slot number/name (try each in order, case-insensitive)
+      const matchedMap = new Map<string, any>(); // key: configured slot dbId -> state entry
+      const stateMatchedSet = new Set<any>();
+
+      for (const slot of this.slots) {
+        const slotIdStr = String(slot.slotId || '').trim().toLowerCase();
+        const dbIdStr = String(slot.dbId || '').trim().toLowerCase();
+
+        const match = slotsData.find(s => {
+          const sSlotId = String(s.slotId ?? '').trim().toLowerCase();
+          const sDbId = String(s.dbId ?? '').trim().toLowerCase();
+          const sName = String(s.name ?? s.slot_number ?? '').trim().toLowerCase();
+
+          // 1. Match by slotId
+          if (sSlotId && (sSlotId === slotIdStr || sSlotId === dbIdStr)) return true;
+          // 2. Match by dbId
+          if (sDbId && (sDbId === dbIdStr || sDbId === slotIdStr)) return true;
+          // 3. Match by name or slot_number (case-insensitive)
+          if (sName && (sName === slotIdStr || sName === dbIdStr)) return true;
+
+          return false;
+        });
+
+        if (match) {
+          matchedMap.set(slot.dbId, match);
+          stateMatchedSet.add(match);
+        } else {
+          // Log a warning in the console when a slot in the page has no match in /state, listing both sets of ids
+          const pageSlotIds = this.slots.map(s => ({ slotId: s.slotId, dbId: s.dbId }));
+          const stateSlotIds = slotsData.map(s => ({ slotId: s.slotId, dbId: s.dbId, name: s.name }));
+          console.warn(`[SlotMonitor IP] No /state match for slot "${slot.slotId}" (dbId: ${slot.dbId}):`, {
+            unmatchedSlot: slot,
+            pageSlots: pageSlotIds,
+            stateSlots: stateSlotIds
+          });
+        }
+      }
+
+      const changes: SlotDetectionResult[] = [];
+
+      for (const slot of this.slots) {
+        const s = matchedMap.get(slot.dbId);
+        if (!s) continue;
+
+        let state = this.occupancyState.get(slot.dbId);
+        if (!state) {
+          state = { occupied: false, count: 0 };
+          this.occupancyState.set(slot.dbId, state);
+        }
+
+        // Expose type/color and live info to SlotManagement DOM
+        const targetIds = [slot.dbId, slot.slotId, s.dbId, s.slotId].filter(Boolean);
+        for (const tid of targetIds) {
+          const slotEl = document.getElementById(`slot-card-${tid}`);
+          if (slotEl) {
+            slotEl.setAttribute('data-vehicle-type', s.vehicleType || '');
+            slotEl.setAttribute('data-color', s.color || '');
+            slotEl.setAttribute('data-type-conf', (s.typeConfidence || 0).toString());
+            slotEl.setAttribute('data-mismatch', s.slotTypeMismatch ? 'true' : 'false');
+            slotEl.setAttribute('data-live-type', s.liveVehicleType || '');
+            slotEl.setAttribute('data-live-color', s.liveColor || '');
+            slotEl.setAttribute('data-live-conf', (s.liveConfidence || 0).toString());
+            slotEl.setAttribute('data-live-overlap', (s.liveOverlap || 0).toString());
+            slotEl.setAttribute('data-stable-occupied', s.stableOccupied ? 'true' : 'false');
+            slotEl.setAttribute('data-expected-type', s.expectedType || '');
+            slotEl.setAttribute('data-detected-type', s.detectedType || '');
+          }
+        }
+
+        // Check if occupancy differs from the state currently stored
+        // Note: whenever stableOccupied differs from the status currently stored in the tracker/DB, update!
+        const isOccupied = Boolean(s.stableOccupied);
+        if (state.occupied !== isOccupied) {
+          state.occupied = isOccupied;
+          changes.push({ slotId: slot.slotId, dbId: slot.dbId, occupied: isOccupied });
+        }
+      }
+
+      if (changes.length > 0) {
+        await this.updateSlotStatuses(changes);
+        this.slotChangeCallbacks.forEach(cb => cb(changes));
+      }
+      this.frameCallbacks.forEach(cb => cb());
+    } catch (err: any) {
+      console.error('[SlotMonitor IP] Error polling state:', err);
+    } finally {
+      this.isPollingIp = false;
+    }
+  }
+
   /**
    * updateSlotStatuses — Persists occupancy changes to Supabase.
    *
@@ -2124,18 +2314,29 @@ export class SlotMonitorProcessor {
     for (const change of changes) {
       const newStatus = change.occupied ? 'occupied' : 'available';
       try {
-        const { error } = await supabase
+        const response = await supabase
           .from('parking_slots')
           .update({ status: newStatus })
-          .eq('id', change.dbId);
+          .eq('id', change.dbId)
+          .select();
 
-        if (error) {
-          console.error(`[SlotMonitor] Failed to update ${change.slotId}:`, error.message);
+        console.log(`[SlotMonitor] Supabase update response for ${change.slotId} (${change.dbId}):`, response);
+
+        if (response.error) {
+          const errMsg = `Failed to update slot ${change.slotId} to ${newStatus}: ${response.error.message}`;
+          console.error(`[SlotMonitor] ${errMsg}`);
+          this.ipErrorCallbacks.forEach(cb => cb(errMsg));
         } else {
-          console.log(`[SlotMonitor] ${change.slotId} → ${newStatus}`);
+          console.log(`[SlotMonitor] Successfully saved: ${change.slotId} → ${newStatus}`);
+          // Notify hooks to refetch parking_slots immediately
+          if (typeof window !== 'undefined') {
+            window.dispatchEvent(new CustomEvent('slot-status-updated', { detail: { slotId: change.slotId, status: newStatus } }));
+          }
         }
-      } catch (err) {
-        console.error(`[SlotMonitor] Error updating ${change.slotId}:`, err);
+      } catch (err: any) {
+        const errMsg = `Exception updating slot ${change.slotId}: ${err?.message || err}`;
+        console.error(`[SlotMonitor] ${errMsg}`);
+        this.ipErrorCallbacks.forEach(cb => cb(errMsg));
       }
     }
 
@@ -2160,3 +2361,4 @@ export class SlotMonitorProcessor {
     }
   }
 }
+

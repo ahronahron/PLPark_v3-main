@@ -15,28 +15,75 @@
 import { useEffect, useState } from 'react';
 import { supabase, type ParkingSlot, type Camera, type PlateRecognition, type ParkingSession, type Notification } from '@/lib/supabase';
 
+// Global listeners for slot refetch requests (e.g. after slot monitor status updates)
+const slotRefetchListeners = new Set<() => void>();
+
+export function triggerSlotsRefetch() {
+  slotRefetchListeners.forEach(listener => {
+    try { listener(); } catch (e) { console.error('Error in slotRefetchListener', e); }
+  });
+}
+
+// Also listen to window events if dispatched
+if (typeof window !== 'undefined') {
+  window.addEventListener('slot-status-updated', () => triggerSlotsRefetch());
+}
+
 /**
  * useSlots — Fetches all parking slots from the database.
  *
  * Queries the `parking_slots` table ordered by slot_id (e.g., A1, A2, B1...).
- * Returns the slots array, a setter function for optimistic local updates,
- * and a loading boolean that starts true until the query completes.
+ * Polls every 2 seconds and refetches immediately when slot status changes.
+ * Avoids re-render flicker by only updating state when JSON data changes.
  *
- * @returns {{ slots: ParkingSlot[], setSlots: Function, loading: boolean }}
+ * @returns {{ slots: ParkingSlot[], setSlots: Function, loading: boolean, refetch: () => Promise<void> }}
  */
 export function useSlots() {
   const [slots, setSlots] = useState<ParkingSlot[]>([]);
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
-    // Fetch all parking slots ordered alphabetically by slot_id
-    supabase.from('parking_slots').select('*').order('slot_id').then(({ data }) => {
-      setSlots(data || []);
-      setLoading(false);
-    });
+    let isMounted = true;
+    let lastJson = '';
+
+    const fetchSlots = async () => {
+      try {
+        const { data, error } = await supabase.from('parking_slots').select('*').order('slot_id');
+        if (error || !data) return;
+        if (!isMounted) return;
+
+        const newJson = JSON.stringify(data);
+        if (newJson !== lastJson) {
+          lastJson = newJson;
+          setSlots(data as ParkingSlot[]);
+        }
+      } catch (err) {
+        console.error('[useSlots] Error fetching slots:', err);
+      } finally {
+        if (isMounted) setLoading(false);
+      }
+    };
+
+    // Initial fetch
+    fetchSlots();
+
+    // Refetch every 2 seconds
+    const intervalId = setInterval(fetchSlots, 2000);
+
+    // Immediate refetch listener
+    const onRefetchRequested = () => {
+      fetchSlots();
+    };
+    slotRefetchListeners.add(onRefetchRequested);
+
+    return () => {
+      isMounted = false;
+      clearInterval(intervalId);
+      slotRefetchListeners.delete(onRefetchRequested);
+    };
   }, []);
 
-  return { slots, setSlots, loading };
+  return { slots, setSlots, loading, refetch: triggerSlotsRefetch };
 }
 
 /**
