@@ -11,6 +11,8 @@ import {
   type SlotDetectionResult,
 } from '@/lib/visionEngine';
 
+import { useSlots } from '@/lib/hooks';
+
 type Point = [number, number];
 
 interface SlotAOI {
@@ -24,7 +26,7 @@ const DEFAULT_SLOT_ACTIONS = { reservation: true, disable: true, edit: true, del
 type SlotActionSettings = typeof DEFAULT_SLOT_ACTIONS;
 
 export function SlotManagement() {
-  const [slots, setSlots] = useState<ParkingSlot[]>([]);
+  const { slots, setSlots } = useSlots();
   const [cameras, setCameras] = useState<Camera[]>([]);
   const [activeCamera, setActiveCamera] = useState<Camera | null>(null);
   const [editingSlotId, setEditingSlotId] = useState<string | null>(null);
@@ -32,24 +34,27 @@ export function SlotManagement() {
   const [saveStatus, setSaveStatus] = useState<{ slotId: string; msg: string; ok: boolean } | null>(null);
   const [isCameraOpen, setIsCameraOpen] = useState(true);
   const [slotActions, setSlotActions] = useState<SlotActionSettings>(DEFAULT_SLOT_ACTIONS);
+  const [liveSlotStates, setLiveSlotStates] = useState<Record<string, any>>({});
 
-  // Load data from Supabase
+  // Sync AOI map from slots whenever slots change
+  useEffect(() => {
+    setAoiMap(prev => {
+      const map: Record<string, SlotAOI> = { ...prev };
+      slots.forEach(slot => {
+        if (slot.aoi_polygon && Array.isArray(slot.aoi_polygon) && slot.aoi_polygon.length >= 3) {
+          map[slot.id] = { slotId: slot.slot_id, points: slot.aoi_polygon as Point[], color: slot.aoi_color || prev[slot.id]?.color || AOI_COLORS[0] };
+        }
+      });
+      return map;
+    });
+  }, [slots]);
+
+  // Load cameras & settings from Supabase
   useEffect(() => {
     supabase.from('settings').select('value').eq('key', 'slot_action_settings').maybeSingle().then(({ data }) => {
       if (data?.value && typeof data.value === 'object') {
         setSlotActions({ ...DEFAULT_SLOT_ACTIONS, ...data.value });
       }
-    });
-    supabase.from('parking_slots').select('*').order('slot_id').then(({ data }) => {
-      const loadedSlots = (data || []) as ParkingSlot[];
-      setSlots(loadedSlots);
-      const map: Record<string, SlotAOI> = {};
-      loadedSlots.forEach(slot => {
-        if (slot.aoi_polygon && Array.isArray(slot.aoi_polygon) && slot.aoi_polygon.length >= 3) {
-          map[slot.id] = { slotId: slot.slot_id, points: slot.aoi_polygon as Point[], color: slot.aoi_color || AOI_COLORS[0] };
-        }
-      });
-      setAoiMap(map);
     });
     supabase.from('cameras').select('*').order('name').then(({ data }) => {
       const loadedCameras = (data || []) as Camera[];
@@ -57,25 +62,6 @@ export function SlotManagement() {
       const slotCamera = loadedCameras.find(camera => camera.type === 'slot');
       if (slotCamera) setActiveCamera(slotCamera);
     });
-
-    // Realtime subscription for slot status changes
-    const channel = supabase
-      .channel('slot-management-realtime')
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'parking_slots' }, (payload) => {
-        if (payload.eventType === 'INSERT') {
-          const newSlot = payload.new as ParkingSlot;
-          setSlots(prev => [...prev, newSlot].sort((a, b) => a.slot_id.localeCompare(b.slot_id)));
-        } else if (payload.eventType === 'UPDATE') {
-          const updated = payload.new as ParkingSlot;
-          setSlots(prev => prev.map(slot => slot.id === updated.id ? { ...slot, ...updated } : slot));
-        } else if (payload.eventType === 'DELETE') {
-          const deleted = payload.old as ParkingSlot;
-          setSlots(prev => prev.filter(slot => slot.id !== deleted.id));
-        }
-      })
-      .subscribe();
-
-    return () => { supabase.removeChannel(channel); };
   }, []);
 
   /** Get slots assigned to the active camera (by camera_id or slot_range match) */
@@ -222,6 +208,11 @@ export function SlotManagement() {
           editingSlotId={editingSlotId} onStartEditing={startEditing} onStopEditing={() => setEditingSlotId(null)}
           onSaveAOI={saveAOI} onClearAOI={clearAOI} onDeleteSlot={deleteSlot} onAddSlot={addSlot}
           saveStatus={saveStatus}
+          liveSlotStates={liveSlotStates}
+          onSlotStatesChange={(newMap) => {
+            // Guarantee fresh object reference for React re-render
+            setLiveSlotStates(prev => ({ ...prev, ...newMap }));
+          }}
         />
       )}
 
@@ -229,11 +220,24 @@ export function SlotManagement() {
       <div className="slot-summary-section">
         <h3 className="slot-summary-title">Slots in {activeCamera?.name || 'Camera'} ({currentSlots.length})</h3>
         <div className="slots-grid">
-          {currentSlots.map(slot => (
-            <SlotCard key={slot.id} slot={slot} aoi={aoiMap[slot.id]} isEditing={editingSlotId === slot.id}
-              enabledActions={slotActions}
-              onEdit={() => startEditing(slot.id)} onUpdate={updateSlot} onDelete={() => deleteSlot(slot.id)} />
-          ))}
+          {currentSlots.map(slot => {
+            const live = liveSlotStates[slot.id] ||
+              liveSlotStates[slot.slot_id] ||
+              liveSlotStates[slot.slot_id.toLowerCase()] ||
+              liveSlotStates[slot.slot_id.toUpperCase()] ||
+              Object.values(liveSlotStates).find((s: any) =>
+                (s.dbId && String(s.dbId).toLowerCase() === String(slot.id).toLowerCase()) ||
+                (s.slotId && String(s.slotId).toLowerCase() === String(slot.slot_id).toLowerCase()) ||
+                (s.name && String(s.name).toLowerCase() === String(slot.slot_id).toLowerCase())
+              );
+
+            return (
+              <SlotCard key={slot.id} slot={slot} aoi={aoiMap[slot.id]} isEditing={editingSlotId === slot.id}
+                enabledActions={slotActions}
+                liveState={live}
+                onEdit={() => startEditing(slot.id)} onUpdate={updateSlot} onDelete={() => deleteSlot(slot.id)} />
+            );
+          })}
           {currentSlots.length === 0 && (
             <div className="empty-state" style={{ gridColumn: '1 / -1' }}>
               No slots yet. Use the "Add Slot" button in the sidebar to create parking slots.
@@ -251,7 +255,7 @@ export function SlotManagement() {
 function CameraPanel({
   camera, slots, aoiMap, setAoiMap, editingSlotId,
   onStartEditing, onStopEditing, onSaveAOI, onClearAOI, onDeleteSlot, onAddSlot,
-  saveStatus,
+  saveStatus, liveSlotStates, onSlotStatesChange,
 }: {
   camera: Camera;
   slots: ParkingSlot[];
@@ -265,6 +269,8 @@ function CameraPanel({
   onDeleteSlot: (slotId: string) => void;
   onAddSlot: (name: string, type: 'car' | 'motorcycle') => void;
   saveStatus: { slotId: string; msg: string; ok: boolean } | null;
+  liveSlotStates?: Record<string, any>;
+  onSlotStatesChange?: (states: Record<string, any>) => void;
 }) {
   const svgRef = useRef<SVGSVGElement>(null);
   const videoRef = useRef<HTMLVideoElement>(null);
@@ -280,6 +286,102 @@ function CameraPanel({
   const [detections, setDetections] = useState<Detection[]>([]);
   const [initProgress, setInitProgress] = useState('');
   const [monitorError, setMonitorError] = useState('');
+
+  // Debug state for IP camera
+  const slotMonitorUrl = import.meta.env.VITE_SLOT_MONITOR_URL || 'http://127.0.0.1:8766';
+  const [showDebug, setShowDebug] = useState(false);
+  const [debugState, setDebugState] = useState<any>(null);
+
+  // Poll /state every second for the debug panel when active camera is IP
+  useEffect(() => {
+    if (camera.connection_method !== 'ip') return;
+    const interval = setInterval(() => {
+      fetch(`${slotMonitorUrl}/state`)
+        .then(res => res.json())
+        .then(data => setDebugState(data))
+        .catch(err => {
+          console.debug('[SlotMonitor Debug] /state poll error:', err);
+        });
+    }, 1000);
+    return () => clearInterval(interval);
+  }, [camera.connection_method, slotMonitorUrl]);
+
+  // Calibration state
+  const [isCalibrating, setIsCalibrating] = useState(false);
+  const [isCalibrated, setIsCalibrated] = useState<boolean | null>(null);
+  const [calibrateMsg, setCalibrateMsg] = useState('');
+
+  // IP Camera Health & Connection State
+  const [ipFeedStatus, setIpFeedStatus] = useState<{ status: 'connecting' | 'connected' | 'error'; message: string }>({
+    status: 'connecting',
+    message: 'Connecting...'
+  });
+
+  // Poll /health every second when active camera is IP
+  useEffect(() => {
+    if (camera.connection_method !== 'ip') return;
+
+    const rawUrl = (camera.ip_address || '').trim();
+    const formattedUrl = rawUrl ? (rawUrl.startsWith('http') ? rawUrl : `http://${rawUrl}`) : '';
+
+    // Reset displayed status when camera changes until /health confirms
+    setIpFeedStatus({
+      status: 'connecting',
+      message: rawUrl ? `Connecting to ${rawUrl}...` : 'No IP address configured'
+    });
+
+    const pollHealth = async () => {
+      try {
+        const res = await fetch(`${slotMonitorUrl}/health`);
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        const data = await res.json();
+
+        if (typeof data.calibrated === 'boolean') {
+          setIsCalibrated(data.calibrated);
+        }
+
+        const norm = (u: string) => (u ? (u.startsWith('http') ? u : `http://${u}`).replace(/\/+$/, '').toLowerCase() : '');
+        const expectedNorm = norm(formattedUrl);
+        const returnedNorm = norm(data.cameraUrl || data.url || '');
+        const urlMatches = Boolean(expectedNorm && returnedNorm && expectedNorm === returnedNorm);
+
+        // Confirmed when cameraConnected is true, frame arrived within last 5s, and URL matches
+        const isOk = Boolean(data.cameraConnected && urlMatches && (data.frameAge !== undefined ? data.frameAge < 5 : true));
+
+        if (isOk) {
+          setIpFeedStatus({ status: 'connected', message: 'Camera feed OK' });
+        } else {
+          setIpFeedStatus({ status: 'error', message: `No frames from ${rawUrl || 'camera'}` });
+        }
+      } catch {
+        setIpFeedStatus({ status: 'error', message: `No frames from ${rawUrl || 'camera'}` });
+      }
+    };
+
+    pollHealth();
+    const interval = setInterval(pollHealth, 1000);
+    return () => clearInterval(interval);
+  }, [camera.id, camera.connection_method, camera.ip_address, slotMonitorUrl]);
+
+  const handleCalibrateEmpty = async () => {
+    setIsCalibrating(true);
+    setCalibrateMsg('');
+    try {
+      const res = await fetch(`${slotMonitorUrl}/calibrate-empty`, { method: 'POST' });
+      const data = await res.json();
+      if (res.ok && data.status === 'ok') {
+        setIsCalibrated(true);
+        setCalibrateMsg('Empty reference saved');
+      } else {
+        setCalibrateMsg(data.message || 'Calibration failed');
+      }
+    } catch (err: any) {
+      setCalibrateMsg(err.message || 'Error connecting to service');
+    } finally {
+      setIsCalibrating(false);
+      setTimeout(() => setCalibrateMsg(''), 4000);
+    }
+  };
 
   // Add slot form
   const [showAddForm, setShowAddForm] = useState(false);
@@ -305,7 +407,12 @@ function CameraPanel({
     if (!processorRef.current || !isMonitoring) return;
     const configs: SlotAOIConfig[] = slots
       .filter(slot => aoiMap[slot.id]?.points.length >= 3)
-      .map(slot => ({ slotId: slot.slot_id, dbId: slot.id, polygon: aoiMap[slot.id].points as [number, number][] }));
+      .map(slot => ({
+        slotId: slot.slot_id,
+        dbId: slot.id,
+        polygon: aoiMap[slot.id].points as [number, number][],
+        vehicleType: slot.vehicle_type
+      }));
     processorRef.current.setSlots(configs);
   }, [aoiMap, slots, isMonitoring]);
 
@@ -344,31 +451,107 @@ function CameraPanel({
   }, [detections]);
 
   useEffect(() => { drawOverlay(); }, [detections, drawOverlay]);
-  useEffect(() => { return () => { processorRef.current?.stop(); processorRef.current = null; }; }, [camera.id]);
 
   // Monitoring controls
   const handleStartMonitoring = async () => {
-    if (!videoRef.current) return;
+    if (camera.connection_method !== 'ip' && !videoRef.current) return;
     setMonitorError('');
     try {
-      setInitProgress('Loading YOLO model...');
+      setInitProgress('Starting...');
       const processor = new SlotMonitorProcessor();
       processor.onStatusChange(s => setMonitorStatus(s));
       processor.onDetections(d => setDetections(d));
       processor.onFrame(() => drawOverlay());
+      processor.onSlotState((states: any[]) => {
+        const map: Record<string, any> = {};
+        for (const s of states) {
+          if (s.dbId) map[s.dbId] = s;
+          if (s.slotId) map[s.slotId] = s;
+        }
+        onSlotStatesChange?.(map);
+        // Also update debugState slots directly from processor stream
+        setDebugState((prev: any) => ({
+          cameraConnected: true,
+          fps: prev?.fps || 0,
+          ...prev,
+          slots: states
+        }));
+      });
       processor.onSlotChange((changes: SlotDetectionResult[]) => { console.log('[SlotManagement] Slot changes:', changes); });
+      processor.onIpError((err: string) => { setMonitorError(err); });
       await processor.initialize();
       setInitProgress('Starting camera...');
-      await processor.startCamera(selectedDevice, videoRef.current);
+      await processor.startCamera(selectedDevice, videoRef.current as any, camera);
       const configs: SlotAOIConfig[] = slots
         .filter(slot => aoiMap[slot.id]?.points.length >= 3)
-        .map(slot => ({ slotId: slot.slot_id, dbId: slot.id, polygon: aoiMap[slot.id].points as [number, number][] }));
+        .map(slot => ({ slotId: slot.slot_id, dbId: slot.id, polygon: aoiMap[slot.id].points as [number, number][], vehicleType: slot.vehicle_type as any }));
       processor.setSlots(configs);
       processor.startProcessing();
       processorRef.current = processor;
       setIsMonitoring(true); setInitProgress('');
     } catch (err: any) { setMonitorError(err.message || 'Failed to start monitoring'); setInitProgress(''); }
   };
+
+  // Cleanly switch cameras: stop previous processor, POST /config with new camera URL, and auto-start monitoring on IP cameras
+  useEffect(() => {
+    let cancelled = false;
+
+    const initForCamera = async () => {
+      if (processorRef.current) {
+        await processorRef.current.stop();
+        processorRef.current = null;
+      }
+      setIsMonitoring(false);
+      setDetections([]);
+      setMonitorStatus('idle');
+
+      if (camera.connection_method === 'ip' && camera.ip_address) {
+        const rawUrl = (camera.ip_address || '').trim();
+        const formattedUrl = rawUrl ? (rawUrl.startsWith('http') ? rawUrl : `http://${rawUrl}`) : '';
+        const comparableSlots = slots
+          .filter(slot => aoiMap[slot.id]?.points.length >= 3)
+          .map(slot => ({
+            slotId: slot.slot_id,
+            dbId: slot.id,
+            polygon: aoiMap[slot.id].points as [number, number][],
+            vehicleType: slot.vehicle_type
+          }));
+
+        console.log('[SlotManagement] Sending slot config to Python on camera switch:');
+        comparableSlots.forEach(s => {
+          console.log(`  -> Slot "${s.slotId}" (dbId: ${s.dbId}): vehicleType="${s.vehicleType}"`);
+        });
+
+        // POST /config with new camera's URL immediately when selected camera changes
+        try {
+          await fetch(`${slotMonitorUrl}/config`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              camera: { url: formattedUrl, mode: 'mjpeg' },
+              slots: comparableSlots,
+              replaceAll: true
+            })
+          });
+        } catch (e) {
+          console.warn('[SlotManagement] Error posting /config on camera switch:', e);
+        }
+
+        if (!cancelled) {
+          await handleStartMonitoring();
+        }
+      }
+    };
+
+    initForCamera();
+
+    return () => {
+      cancelled = true;
+      processorRef.current?.stop();
+      processorRef.current = null;
+      setIsMonitoring(false);
+    };
+  }, [camera.id, camera.connection_method, camera.ip_address, slotMonitorUrl]);
 
   const handleStopMonitoring = async () => {
     if (processorRef.current) { await processorRef.current.stop(); processorRef.current = null; }
@@ -415,8 +598,19 @@ function CameraPanel({
         </div>
 
         <div className="camera-feed-body" onMouseMove={handleMove} onMouseUp={() => setDragIdx(null)} onMouseLeave={() => setDragIdx(null)}>
-          <video ref={videoRef} className="camera-video-element" playsInline muted style={{ display: isMonitoring ? 'block' : 'none' }} />
-          <canvas ref={overlayRef} className="camera-overlay-canvas" style={{ display: isMonitoring ? 'block' : 'none' }} />
+          {camera.connection_method === 'ip' ? (
+            camera.ip_address ? (
+              <img 
+                className="camera-video-element" 
+                style={{ display: 'block', width: '100%', height: '100%', objectFit: 'cover' }} 
+                src={`${import.meta.env.VITE_SLOT_MONITOR_URL || 'http://127.0.0.1:8766'}/${editingSlotId ? 'raw' : 'preview'}.mjpg?t=${camera.id}_${editingSlotId ? 'raw' : 'preview'}`}
+                alt="IP Camera Stream"
+              />
+            ) : null
+          ) : (
+            <video ref={videoRef} className="camera-video-element" playsInline muted style={{ display: isMonitoring ? 'block' : 'none' }} />
+          )}
+          {camera.connection_method !== 'ip' && <canvas ref={overlayRef} className="camera-overlay-canvas" style={{ display: isMonitoring ? 'block' : 'none' }} />}
 
           {!isMonitoring && !initProgress && (
             <div className="camera-placeholder">
@@ -427,10 +621,26 @@ function CameraPanel({
 
           {initProgress && (<div className="camera-init-overlay"><div className="camera-init-spinner" /><span>{initProgress}</span></div>)}
 
-          {isMonitoring && (
-            <div className={`camera-status-badge status-${monitorStatus === 'scanning' ? 'scanning' : 'idle'}`}>
-              <span className="camera-status-dot" />{monitorStatus === 'scanning' ? 'Monitoring' : monitorStatus}
-            </div>
+          {camera.connection_method === 'ip' ? (
+            ipFeedStatus.status === 'connected' ? (
+              <div className="camera-status-badge status-confirmed" style={{ textTransform: 'none', background: 'rgba(22, 163, 74, 0.35)', color: '#86efac' }}>
+                <span className="camera-status-dot" style={{ background: '#22c55e' }} /> Camera feed OK
+              </div>
+            ) : ipFeedStatus.status === 'error' ? (
+              <div className="camera-status-badge status-error" style={{ textTransform: 'none', background: 'rgba(220, 38, 38, 0.35)', color: '#fca5a5' }}>
+                <span className="camera-status-dot" style={{ background: '#ef4444' }} /> {ipFeedStatus.message}
+              </div>
+            ) : (
+              <div className="camera-status-badge status-loading" style={{ textTransform: 'none', background: 'rgba(30, 41, 59, 0.7)', color: '#94a3b8' }}>
+                <span className="camera-status-dot" style={{ background: '#3b82f6' }} /> {ipFeedStatus.message}
+              </div>
+            )
+          ) : (
+            isMonitoring && (
+              <div className={`camera-status-badge status-${monitorStatus === 'scanning' ? 'scanning' : 'idle'}`}>
+                <span className="camera-status-dot" />{monitorStatus === 'scanning' ? 'Monitoring' : monitorStatus}
+              </div>
+            )
           )}
           {isMonitoring && vehicleCount > 0 && (
             <div className="camera-mode-badge entrance" style={{ background: 'rgba(34,197,94,0.9)' }}>
@@ -469,25 +679,56 @@ function CameraPanel({
 
         {/* Monitoring controls */}
         <div className="slot-monitor-controls">
-          <div className="camera-device-select">
-            <select value={selectedDevice} onChange={e => setSelectedDevice(e.target.value)} disabled={isMonitoring}>
-              {devices.length === 0 && <option value="">No cameras found</option>}
-              {devices.map(d => <option key={d.deviceId} value={d.deviceId}>{d.label}</option>)}
-            </select>
-          </div>
-          <div className="camera-action-btns">
-            {!isMonitoring ? (
-              <button className="camera-start-btn" onClick={handleStartMonitoring} disabled={devices.length === 0 || !!initProgress}>
-                <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><polygon points="5,3 19,12 5,21" /></svg>
-                Start Monitoring
-              </button>
-            ) : (
-              <button className="camera-stop-btn" onClick={handleStopMonitoring}>
-                <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="6" width="12" height="12" rx="1" /></svg>
-                Stop
-              </button>
-            )}
-          </div>
+          {camera.connection_method === 'ip' ? (
+            <div style={{ flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '6px 12px', gap: 10, flexWrap: 'wrap' }}>
+              <div style={{ fontSize: 13, color: 'var(--text-muted)' }}>
+                Monitoring via Python IP Camera Backend ({camera.ip_address})
+                {isCalibrated !== null && (
+                  <span style={{ marginLeft: 8, fontSize: 11, padding: '2px 6px', borderRadius: 4, background: isCalibrated ? 'rgba(34,197,94,0.15)' : 'rgba(234,179,8,0.15)', color: isCalibrated ? '#22c55e' : '#eab308' }}>
+                    {isCalibrated ? '✓ Calibrated' : 'Not calibrated'}
+                  </span>
+                )}
+              </div>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                {calibrateMsg && <span style={{ fontSize: 12, color: 'var(--text-muted)' }}>{calibrateMsg}</span>}
+                <button
+                  className="camera-start-btn"
+                  onClick={handleCalibrateEmpty}
+                  disabled={isCalibrating}
+                  title="Capture current view as empty parking lot reference for improved color accuracy"
+                  style={{ display: 'flex', alignItems: 'center', gap: 6, padding: '6px 12px', fontSize: 12 }}
+                >
+                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                    <path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z"/>
+                    <circle cx="12" cy="13" r="4"/>
+                  </svg>
+                  {isCalibrating ? 'Saving…' : 'Set empty reference'}
+                </button>
+              </div>
+            </div>
+          ) : (
+            <>
+              <div className="camera-device-select">
+                <select value={selectedDevice} onChange={e => setSelectedDevice(e.target.value)} disabled={isMonitoring}>
+                  {devices.length === 0 && <option value="">No cameras found</option>}
+                  {devices.map(d => <option key={d.deviceId} value={d.deviceId}>{d.label}</option>)}
+                </select>
+              </div>
+              <div className="camera-action-btns">
+                {!isMonitoring ? (
+                  <button className="camera-start-btn" onClick={handleStartMonitoring} disabled={devices.length === 0 || !!initProgress}>
+                    <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><polygon points="5,3 19,12 5,21" /></svg>
+                    Start Monitoring
+                  </button>
+                ) : (
+                  <button className="camera-stop-btn" onClick={handleStopMonitoring}>
+                    <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="6" width="12" height="12" rx="1" /></svg>
+                    Stop
+                  </button>
+                )}
+              </div>
+            </>
+          )}
           {isMonitoring && (
             <div className="camera-detection-count">
               <span className="camera-det-num">{vehicleCount}</span>
@@ -497,6 +738,62 @@ function CameraPanel({
         </div>
 
         {monitorError && (<div className="camera-error-bar"><span>⚠ {monitorError}</span><button onClick={() => setMonitorError('')}>✕</button></div>)}
+
+        {/* IP Camera Debug Panel */}
+        {camera.connection_method === 'ip' && (
+          <div style={{ marginTop: 8, padding: '6px 12px', background: 'rgba(0, 0, 0, 0.45)', borderRadius: 6, border: '1px solid rgba(255, 255, 255, 0.08)', fontSize: 12 }}>
+            <div
+              style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', cursor: 'pointer', userSelect: 'none' }}
+              onClick={() => setShowDebug(prev => !prev)}
+            >
+              <div style={{ display: 'flex', alignItems: 'center', gap: 6, fontWeight: 600, color: 'var(--text-muted)' }}>
+                <span>{showDebug ? '▼' : '►'}</span>
+                <span>Debug — Raw /state ({debugState?.slots?.length ?? 0} slots, {debugState?.fps ?? 0} fps)</span>
+              </div>
+              <span style={{ fontSize: 11, color: debugState?.cameraConnected ? '#22c55e' : '#ef4444' }}>
+                {debugState?.cameraConnected ? '● Online (1s refresh)' : '○ No state'}
+              </span>
+            </div>
+
+            {showDebug && (
+              <div style={{ marginTop: 8, maxHeight: 200, overflowY: 'auto' }}>
+                {(!debugState || !debugState.slots || debugState.slots.length === 0) ? (
+                  <div style={{ color: 'var(--text-muted)', fontStyle: 'italic', padding: '4px 0' }}>
+                    No slot data received yet from {slotMonitorUrl}/state
+                  </div>
+                ) : (
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+                    {debugState.slots.map((s: any, idx: number) => {
+                      const dbgSlotType = s.expectedType || s.rawSlotType || s.vehicleTypeConfig || 'unknown';
+                      const dbgDetectedType = s.detectedType || (s.stableOccupied ? (s.vehicleType || 'unknown') : 'none');
+                      const dbgMismatchStr = s.slotTypeMismatch ? 'yes' : 'no';
+                      const compareText = `Slot: ${dbgSlotType} | Detected: ${dbgDetectedType} | Mismatch: ${dbgMismatchStr}`;
+
+                      return (
+                        <div key={s.slotId || s.dbId || idx} style={{ background: 'rgba(0, 0, 0, 0.5)', padding: '6px 8px', borderRadius: 4, border: '1px solid rgba(255, 255, 255, 0.05)' }}>
+                          <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 2 }}>
+                            <strong style={{ color: s.stableOccupied ? '#ef4444' : '#22c55e' }}>
+                              {s.slotId || 'Unnamed'} (dbId: {s.dbId || 'none'})
+                            </strong>
+                            <span style={{ fontSize: 11, color: s.stableOccupied ? '#ef4444' : '#22c55e' }}>
+                              {s.stableOccupied ? 'OCCUPIED' : 'AVAILABLE'}
+                            </span>
+                          </div>
+                          <div style={{ fontSize: 11, color: s.slotTypeMismatch ? '#ef4444' : '#38bdf8', marginBottom: 4, fontFamily: 'Consolas, monospace', fontWeight: 600 }}>
+                            {compareText}
+                          </div>
+                          <pre style={{ margin: 0, fontSize: 10.5, color: '#a1a1aa', whiteSpace: 'pre-wrap', wordBreak: 'break-all', fontFamily: 'Consolas, monospace' }}>
+                            {JSON.stringify(s, null, 2)}
+                          </pre>
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
+              </div>
+            )}
+          </div>
+        )}
       </div>
 
       {/* ===== RIGHT: Slots sidebar ===== */}
@@ -545,12 +842,29 @@ function CameraPanel({
             const isEditing = editingSlotId === slot.id;
             const hasAoi = aoi && aoi.points.length >= 3;
 
+            // For slots on an IP camera, overlay the live occupied state from Python /state (stableOccupied)
+            let displayStatus = slot.status;
+            if (camera.connection_method === 'ip' && liveSlotStates && slot.status !== 'disabled' && slot.status !== 'reserved') {
+              const live = liveSlotStates[slot.id] ||
+                liveSlotStates[slot.slot_id] ||
+                liveSlotStates[slot.slot_id.toLowerCase()] ||
+                liveSlotStates[slot.slot_id.toUpperCase()] ||
+                Object.values(liveSlotStates).find((s: any) =>
+                  (s.dbId && String(s.dbId).toLowerCase() === String(slot.id).toLowerCase()) ||
+                  (s.slotId && String(s.slotId).toLowerCase() === String(slot.slot_id).toLowerCase()) ||
+                  (s.name && String(s.name).toLowerCase() === String(slot.slot_id).toLowerCase())
+                );
+              if (live !== undefined && live.stableOccupied !== undefined) {
+                displayStatus = live.stableOccupied ? 'occupied' : 'available';
+              }
+            }
+
             return (
               <div key={slot.id} className={`aoi-slot-row ${isEditing ? 'editing' : ''}`}>
                 <div className="aoi-slot-info">
                   <span className="aoi-slot-color" style={{ background: aoi?.color || '#333' }} />
                   <span className="aoi-slot-id">{slot.slot_id}</span>
-                  <span className={`aoi-slot-status aoi-status-${slot.status}`}>{slot.status}</span>
+                  <span className={`aoi-slot-status aoi-status-${displayStatus}`}>{displayStatus}</span>
                   {hasAoi && <span className="aoi-point-count">{aoi.points.length} pts</span>}
                   {!hasAoi && <span className="aoi-point-count" style={{ color: 'var(--cursor-yellow)' }}>No AOI</span>}
                 </div>
@@ -626,16 +940,101 @@ function CameraPanel({
 /* ================================================================
    SlotCard — Individual slot card in the grid
    ================================================================ */
-function SlotCard({ slot, aoi, isEditing, enabledActions, onEdit, onUpdate, onDelete }: {
+function SlotCard({ slot, aoi, isEditing, enabledActions, liveState, onEdit, onUpdate, onDelete }: {
   slot: ParkingSlot; aoi?: SlotAOI; isEditing: boolean;
   enabledActions: SlotActionSettings;
+  liveState?: any;
   onEdit: () => void; onUpdate: (id: string, updates: Partial<ParkingSlot>) => void;
   onDelete: () => void;
 }) {
   const [menuOpen, setMenuOpen] = useState(false);
+  const cardRef = useRef<HTMLDivElement>(null);
+  const [domData, setDomData] = useState({
+    type: '', color: '', conf: '', mismatch: 'false',
+    liveType: '', liveColor: '', liveConf: '', liveOverlap: '',
+    stableOccupied: 'false',
+    expectedType: '', detectedType: ''
+  });
+  const [thumbKey, setThumbKey] = useState(Date.now());
+  const [thumbLoaded, setThumbLoaded] = useState(false);
+
+  useEffect(() => {
+    const el = cardRef.current;
+    if (!el) return;
+    const interval = setInterval(() => {
+      setDomData({
+        type: el.getAttribute('data-vehicle-type') || '',
+        color: el.getAttribute('data-color') || '',
+        conf: el.getAttribute('data-type-conf') || '',
+        mismatch: el.getAttribute('data-mismatch') || 'false',
+        liveType: el.getAttribute('data-live-type') || '',
+        liveColor: el.getAttribute('data-live-color') || '',
+        liveConf: el.getAttribute('data-live-conf') || '',
+        liveOverlap: el.getAttribute('data-live-overlap') || '',
+        stableOccupied: el.getAttribute('data-stable-occupied') || 'false',
+        expectedType: el.getAttribute('data-expected-type') || '',
+        detectedType: el.getAttribute('data-detected-type') || '',
+      });
+    }, 500);
+    return () => clearInterval(interval);
+  }, []);
+
+  const slotMonitorUrl = import.meta.env.VITE_SLOT_MONITOR_URL || 'http://127.0.0.1:8766';
+
+  // Evaluate state (liveState prop with domData fallback)
+  const isStable = liveState !== undefined ? Boolean(liveState.stableOccupied) : (domData.stableOccupied === 'true');
+  const isOccupied = slot.status === 'occupied' || isStable;
+
+  const stableType = liveState?.vehicleType ?? domData.type;
+  const stableColor = liveState?.color ?? domData.color;
+  const stableConf = liveState?.typeConfidence ?? (domData.conf ? parseFloat(domData.conf) : 0);
+  const isMismatch = liveState !== undefined ? Boolean(liveState.slotTypeMismatch) : (domData.mismatch === 'true');
+
+  const liveType = liveState?.liveVehicleType ?? domData.liveType;
+  const liveColor = liveState?.liveColor ?? domData.liveColor;
+  const liveConf = liveState?.liveConfidence ?? (domData.liveConf ? parseFloat(domData.liveConf) : 0);
+  const liveOverlap = liveState?.liveOverlap ?? (domData.liveOverlap ? parseFloat(domData.liveOverlap) : 0);
+
+  const hasLiveDetection = Boolean(
+    (liveType && liveType !== 'unknown' && liveType !== '—') ||
+    (liveConf && liveConf > 0)
+  );
+
+  useEffect(() => {
+    if (isOccupied) {
+      const interval = setInterval(() => setThumbKey(Date.now()), 2000);
+      return () => clearInterval(interval);
+    } else {
+      setThumbLoaded(false);
+    }
+  }, [isOccupied]);
+
+  const formatVal = (v: any) => {
+    if (!v || v === 'unknown' || v === 'Unknown' || v === 'null') return '—';
+    return String(v);
+  };
+
+  const formatPct = (c: any) => {
+    if (c === null || c === undefined || c === '' || isNaN(Number(c)) || Number(c) <= 0) return '—';
+    const num = Number(c);
+    const pct = num <= 1 ? Math.round(num * 100) : Math.round(num);
+    return `${pct}%`;
+  };
+
+  // Effective display status: if disabled or reserved, respect that; otherwise follow occupancy
+  const effectiveStatus = (slot.status === 'disabled' || slot.status === 'reserved')
+    ? slot.status
+    : (isOccupied ? 'occupied' : 'available');
+
+  const comparedSlot = liveState?.expectedType || domData.expectedType || slot.vehicle_type || 'unknown';
+  const comparedDetected = isStable
+    ? (liveState?.detectedType || domData.detectedType || stableType || 'unknown')
+    : (hasLiveDetection ? (liveState?.liveVehicleType || liveType || 'detecting') : 'none');
+  const mismatchStr = isMismatch ? 'yes' : 'no';
+  const cardTooltip = `Slot: ${comparedSlot} | Detected: ${comparedDetected} | Mismatch: ${mismatchStr}`;
 
   return (
-    <div className={`slot-card slot-${slot.status} ${isEditing ? 'slot-editing' : ''}`}>
+    <div id={`slot-card-${slot.id}`} ref={cardRef} title={cardTooltip} className={`slot-card slot-${effectiveStatus} ${isEditing ? 'slot-editing' : ''} ${isMismatch ? 'mismatch' : ''}`}>
       <div className="slot-card-header">
         <span className="slot-id">{slot.slot_id}</span>
         <div className="slot-card-header-actions">
@@ -668,10 +1067,64 @@ function SlotCard({ slot, aoi, isEditing, enabledActions, onEdit, onUpdate, onDe
         </div>
       </div>
       <div className="slot-card-type">{slot.vehicle_type}</div>
-      <div className={`slot-status-text slot-${slot.status}`}>{slot.status}</div>
+      <div className={`slot-status-text slot-${effectiveStatus}`}>{effectiveStatus}</div>
       <div className="slot-aoi-indicator">
         {aoi && aoi.points.length >= 3 ? <span className="aoi-set" style={{ color: aoi.color }}>AOI: {aoi.points.length} pts</span> : <span className="aoi-unset">No AOI</span>}
       </div>
+      
+      {/* Live / Stable Detection Feedback */}
+      <div style={{ marginTop: 8, fontSize: 11, background: 'rgba(0,0,0,0.4)', padding: '6px 8px', borderRadius: 6, border: '1px solid rgba(255,255,200,0.06)' }}>
+        {isStable ? (
+          <div>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 2 }}>
+              <span style={{ display: 'inline-block', width: 6, height: 6, borderRadius: '50%', background: '#22c55e' }} />
+              <strong style={{ color: '#22c55e' }}>Confirmed</strong>
+            </div>
+            <div style={{ color: 'var(--cursor-text, #e4e4e7)' }}>
+              {formatVal(stableType)} · {formatVal(stableColor)} · {formatPct(stableConf)}
+            </div>
+          </div>
+        ) : hasLiveDetection ? (
+          <div>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 2 }}>
+              <span style={{ display: 'inline-block', width: 6, height: 6, borderRadius: '50%', background: '#f59e0b' }} />
+              <strong style={{ color: '#f59e0b' }}>Detecting…</strong>
+            </div>
+            <div style={{ color: 'var(--cursor-text, #e4e4e7)' }}>
+              {formatVal(liveType)} · {formatVal(liveColor)} · {formatPct(liveConf)}{liveOverlap > 0 ? ` · ${Math.round(Number(liveOverlap))}% ov` : ''}
+            </div>
+          </div>
+        ) : (
+          <div style={{ color: 'var(--cursor-text-muted, #71717a)', display: 'flex', alignItems: 'center', gap: 6 }}>
+            <span style={{ display: 'inline-block', width: 6, height: 6, borderRadius: '50%', background: '#71717a' }} />
+            <span>No vehicle</span>
+          </div>
+        )}
+
+        {isMismatch && (
+          <div title={cardTooltip} style={{ color: '#ef4444', fontWeight: 600, marginTop: 4, display: 'flex', alignItems: 'center', gap: 4 }}>
+            <span>⚠</span> Type Mismatch
+          </div>
+        )}
+      </div>
+
+      {/* Vehicle thumbnail crop while occupied */}
+      {isOccupied && (
+        <div style={{ marginTop: 8, borderRadius: 6, overflow: 'hidden', height: 80, background: '#18181b', border: '1px solid rgba(255,255,255,0.08)', position: 'relative' }}>
+          <img
+            src={`${slotMonitorUrl}/slot/${encodeURIComponent(slot.slot_id)}.jpg?t=${thumbKey}`}
+            alt={`Vehicle in slot ${slot.slot_id}`}
+            style={{ width: '100%', height: '100%', objectFit: 'cover', display: thumbLoaded ? 'block' : 'none' }}
+            onLoad={() => setThumbLoaded(true)}
+            onError={() => setThumbLoaded(false)}
+          />
+          {!thumbLoaded && (
+            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', height: '100%', fontSize: 11, color: 'var(--cursor-text-muted, #71717a)' }}>
+              Vehicle crop
+            </div>
+          )}
+        </div>
+      )}
     </div>
   );
 }

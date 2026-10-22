@@ -1,4 +1,4 @@
-ultralytics==8.0.114
+ultralytics>=8.0.114
 setuptools
 pandas
 opencv-python
@@ -6,3 +6,5 @@ numpy
 scipy
 easyocr
 filterpy
+shapely
+requests

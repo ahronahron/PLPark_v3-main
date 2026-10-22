@@ -104,7 +104,7 @@ export function Settings() {
 
   const handleCameraUpdate = async (camera: any) => {
     const changes = cameraEdits[String(camera.id)] || {};
-    if (!changes.type && !changes.location && !changes.slot_range && !changes.device_id) {
+    if (!changes.type && !changes.location && !changes.slot_range && !changes.device_id && changes.ip_address === undefined) {
       setSaveMsg('No changes to save.');
       return;
     }
@@ -261,7 +261,10 @@ export function Settings() {
                     {newCamera.connection_method === 'ip' ? (
                       <div className="form-group">
                         <label>IP Address</label>
-                        <input value={newCamera.ip_address} onChange={e => setNewCamera(prev => ({ ...prev, ip_address: e.target.value }))} placeholder="192.168.1.100" />
+                        <input value={newCamera.ip_address} onChange={e => setNewCamera(prev => ({ ...prev, ip_address: e.target.value }))} placeholder="192.168.1.100:8080" />
+                        <span className="form-hint" style={{marginTop: 4, display: 'inline-block'}}>
+                          <a href={`${import.meta.env.VITE_SLOT_MONITOR_URL || 'http://127.0.0.1:8766'}/preview.mjpg`} target="_blank" rel="noreferrer" style={{color: 'var(--accent-color)'}}>Test preview stream</a>
+                        </span>
                       </div>
                     ) : (
                       <div className="form-group">
@@ -298,10 +301,11 @@ export function Settings() {
                 <div>
                   <h3 style={{ fontSize: '13px', fontWeight: 600, marginBottom: '12px' }}>Camera Setup</h3>
                   <table className="data-table">
-                    <thead><tr><th>Name</th><th>Type</th><th>Location</th><th>Slot Range</th><th>Device</th><th>Status</th><th>Action</th></tr></thead>
+                    <thead><tr><th>Name</th><th>Type</th><th>Location</th><th>Slot Range</th><th>Device / IP</th><th>Status</th><th>Action</th></tr></thead>
                     <tbody>
                       {cameras.map(c => {
                         const edit = cameraEdits[String(c.id)] || {};
+                        const isIpCam = c.connection_method === 'ip';
                         return (
                           <tr key={c.id}>
                             <td>{c.name}</td>
@@ -319,10 +323,20 @@ export function Settings() {
                               <input type="text" value={(edit.slot_range ?? c.slot_range) || ''} onChange={e => updateCameraEdit(c.id, 'slot_range', e.target.value)} placeholder="A1-A4" />
                             </td>
                             <td>
-                              <select value={edit.device_id ?? c.device_id ?? ''} onChange={e => updateCameraEdit(c.id, 'device_id', e.target.value)}>
-                                <option value="">Default device</option>
-                                {devices.map(device => <option key={device.deviceId} value={device.deviceId}>{device.label || 'Camera device'}</option>)}
-                              </select>
+                              {isIpCam ? (
+                                <input
+                                  type="text"
+                                  value={(edit.ip_address ?? c.ip_address) || ''}
+                                  onChange={e => updateCameraEdit(c.id, 'ip_address', e.target.value)}
+                                  placeholder="192.168.1.100:8080"
+                                  style={{ minWidth: '150px' }}
+                                />
+                              ) : (
+                                <select value={edit.device_id ?? c.device_id ?? ''} onChange={e => updateCameraEdit(c.id, 'device_id', e.target.value)}>
+                                  <option value="">Default device</option>
+                                  {devices.map(device => <option key={device.deviceId} value={device.deviceId}>{device.label || 'Camera device'}</option>)}
+                                </select>
+                              )}
                             </td>
                             <td><span className={`status-badge ${c.is_online ? 'completed' : 'failed'}`}>{c.is_online ? 'online' : 'offline'}</span></td>
                             <td>

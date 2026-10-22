@@ -30,3 +30,9 @@ dist-ssr
 **/debug_crops/
 
 supabase/.temp/
+
+
+ALPR-Modules/yolov8*.pt
+ALPR-Modules/empty_reference.jpg
+ALPR-Modules/test_*.jpg
+supabase/.temp/
