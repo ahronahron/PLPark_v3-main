@@ -84,7 +84,7 @@ export type Direction = 'entry' | 'exit';
 export type ConceptType = 'A' | 'B' | 'C';
 
 /** Admin dashboard user role levels */
-export type UserRole = 'admin' | 'operator' | 'viewer';
+export type UserRole = 'admin' | 'client' | 'operator' | 'viewer';
 
 // ============================================================
 // DATA INTERFACES — Mirror the Supabase database table schemas

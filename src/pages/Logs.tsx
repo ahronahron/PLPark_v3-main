@@ -32,7 +32,7 @@ import {
   IconPayment
 } from '@/components/Icons';
 
-export function Logs() {
+export function Logs({ readOnly = false }: { readOnly?: boolean }) {
   /** Tabs: Vehicle Logs first, Payment Logs second, User Management third */
   const [activeTab, setActiveTab] = useState<'vehicles' | 'payments' | 'users'>('vehicles');
 
@@ -68,7 +68,7 @@ export function Logs() {
 
   /** Add User Modal State */
   const [isAddUserModalOpen, setIsAddUserModalOpen] = useState(false);
-  const [addUserForm, setAddUserForm] = useState({ full_name: '', username: '', email: '', password: '', role: 'admin' });
+  const [addUserForm, setAddUserForm] = useState({ full_name: '', username: '', email: '', password: '', role: 'client' });
   const [isAddingUser, setIsAddingUser] = useState(false);
   const [addUserError, setAddUserError] = useState('');
 
@@ -76,23 +76,25 @@ export function Logs() {
   const loadData = () => {
     supabase.from('parking_sessions').select('*').order('created_at', { ascending: false }).then(({ data }) => setSessions(data || []));
     supabase.from('payments').select('*').order('created_at', { ascending: false }).then(({ data }) => setPayments(data || []));
-    supabase.from('users').select('*').order('created_at', { ascending: false }).then(({ data }) => setUsers(data || []));
+    if (!readOnly) supabase.from('users').select('*').order('created_at', { ascending: false }).then(({ data }) => setUsers(data || []));
     supabase.from('app_users').select('*').order('created_at', { ascending: false }).then(({ data }) => setAppUsers(data || []));
-    supabase.from('settings').select('key, value').then(({ data }) => {
-      const settings = Object.fromEntries((data || []).map((row: any) => [row.key, row.value]));
-      setAllowManualExit(Boolean(settings.allow_manual_exit));
-      setEnabledPaymentMethods(Array.isArray(settings.payment_methods) ? settings.payment_methods as PaymentMethod[] : ['cash', 'gcash', 'card']);
-      setGracePeriodMinutes(Math.max(0, Number(settings.grace_period_minutes) || 0));
-      setHourlyRateCars(Number(settings.hourly_rate_car) || 50);
-      setHourlyRateMotos(Number(settings.hourly_rate_motorcycle) || 25);
-    });
+    if (!readOnly) {
+      supabase.from('settings').select('key, value').then(({ data }) => {
+        const settings = Object.fromEntries((data || []).map((row: any) => [row.key, row.value]));
+        setAllowManualExit(Boolean(settings.allow_manual_exit));
+        setEnabledPaymentMethods(Array.isArray(settings.payment_methods) ? settings.payment_methods as PaymentMethod[] : ['cash', 'gcash', 'card']);
+        setGracePeriodMinutes(Math.max(0, Number(settings.grace_period_minutes) || 0));
+        setHourlyRateCars(Number(settings.hourly_rate_car) || 50);
+        setHourlyRateMotos(Number(settings.hourly_rate_motorcycle) || 25);
+      });
+    }
   };
 
   useEffect(() => {
     loadData();
     setSearchQuery('');
     setStatusFilter('all');
-  }, [activeTab]);
+  }, [activeTab, readOnly]);
 
   /** Deletions */
   const deleteSession = async (id: string) => {
@@ -146,7 +148,7 @@ export function Logs() {
 
       // Success
       setIsAddUserModalOpen(false);
-      setAddUserForm({ full_name: '', username: '', email: '', password: '', role: 'admin' });
+      setAddUserForm({ full_name: '', username: '', email: '', password: '', role: 'client' });
       await logActivity('Added new user', 'User Management', { username: addUserForm.username });
       
       // Reload users
@@ -409,7 +411,7 @@ export function Logs() {
             <th>Exit Time</th>
             <th>Entrance Snapshot</th>
             <th>Status</th>
-            <th style={{ width: '140px' }}>Actions</th>
+            <th>{readOnly ? 'Details' : 'Actions'}</th>
           </tr>
         </thead>
         <tbody>
@@ -459,7 +461,7 @@ export function Logs() {
                     </button>
 
                     {/* Unified Exit & Pay Action Button for Active sessions */}
-                    {s.status === 'active' ? (
+                    {!readOnly && s.status === 'active' ? (
                       <button
                         className="action-btn action-text btn-manage-exit"
                         title="Manage Payment & Exit"
@@ -470,17 +472,17 @@ export function Logs() {
                       >
                         Exit / Pay
                       </button>
-                    ) : (
+                    ) : !readOnly ? (
                       <span className="text-muted text-xs font-semibold px-2">Completed</span>
-                    )}
+                    ) : null}
 
-                    <button
+                    {!readOnly && <button
                       className="action-btn action-danger"
                       title="Delete session"
                       onClick={() => deleteSession(s.id)}
                     >
                       <IconTrash size={14} />
-                    </button>
+                    </button>}
                   </div>
                 </td>
               </tr>
@@ -530,7 +532,7 @@ export function Logs() {
             <th>Method</th>
             <th>Date & Time</th>
             <th>Status</th>
-            <th>Actions</th>
+            <th>{readOnly ? 'Details' : 'Actions'}</th>
           </tr>
         </thead>
         <tbody>
@@ -550,7 +552,7 @@ export function Logs() {
                 <td onClick={e => e.stopPropagation()}>
                   <div className="row-actions">
                     <button className="action-btn" title="View receipt details" onClick={() => setViewPayment(p)}><IconView size={14} /></button>
-                    <button className="action-btn action-danger" title="Delete payment" onClick={() => deletePayment(p.id)}><IconTrash size={14} /></button>
+                    {!readOnly && <button className="action-btn action-danger" title="Delete payment" onClick={() => deletePayment(p.id)}><IconTrash size={14} /></button>}
                   </div>
                 </td>
               </tr>
@@ -632,16 +634,16 @@ export function Logs() {
           <button className={`logs-tab-btn ${activeTab === 'payments' ? 'active' : ''}`} onClick={() => setActiveTab('payments')}>
             Payment Logs
           </button>
-          <button className={`logs-tab-btn ${activeTab === 'users' ? 'active' : ''}`} onClick={() => setActiveTab('users')}>
+          {!readOnly && <button className={`logs-tab-btn ${activeTab === 'users' ? 'active' : ''}`} onClick={() => setActiveTab('users')}>
             User Management
-          </button>
+          </button>}
         </div>
 
         {/* Tab content panel */}
         <div style={{ padding: '0 20px 20px' }}>
           {activeTab === 'vehicles' && renderVehicles()}
           {activeTab === 'payments' && renderPayments()}
-          {activeTab === 'users' && renderUsers()}
+          {!readOnly && activeTab === 'users' && renderUsers()}
         </div>
       </div>
 
@@ -723,7 +725,7 @@ export function Logs() {
 
               <div className="clean-modal-actions" style={{ marginTop: '16px' }}>
                 <button className="btn-secondary" onClick={() => setViewSession(null)}>Close</button>
-                {viewSession.status === 'active' && (
+                {!readOnly && viewSession.status === 'active' && (
                   <button
                     className="btn-primary"
                     onClick={() => {
@@ -809,7 +811,7 @@ export function Logs() {
       )}
 
       {/* ===== 3. UNIFIED MANAGE EXIT & PAY MODAL FOR LOGS ===== */}
-      {manageExitSession && (
+      {!readOnly && manageExitSession && (
         <div className="modal-overlay" onClick={() => setManageExitSession(null)}>
           <div className="modal-container manual-exit-modal" onClick={e => e.stopPropagation()}>
             <div className="modal-header">
@@ -918,7 +920,7 @@ export function Logs() {
       )}
 
       {/* ===== 4. EXIT CONFIRMATION POPUP ===== */}
-      {exitConfirmSession && (
+      {!readOnly && exitConfirmSession && (
         <div className="modal-overlay confirm-overlay" onClick={() => setExitConfirmSession(null)}>
           <div className="modal-container confirm-modal" onClick={e => e.stopPropagation()}>
             <div className="confirm-modal-header">
@@ -948,7 +950,7 @@ export function Logs() {
       )}
 
       {/* ===== 5. ADD USER MODAL ===== */}
-      {isAddUserModalOpen && (
+      {!readOnly && isAddUserModalOpen && (
         <div className="modal-overlay" onClick={() => setIsAddUserModalOpen(false)}>
           <div className="modal-container" onClick={e => e.stopPropagation()} style={{ maxWidth: '400px' }}>
             <div className="modal-header">
@@ -976,8 +978,7 @@ export function Logs() {
                 <label>Role</label>
                 <select value={addUserForm.role} onChange={e => setAddUserForm({ ...addUserForm, role: e.target.value })}>
                   <option value="admin">Admin</option>
-                  <option value="operator">Operator</option>
-                  <option value="viewer">Viewer</option>
+                  <option value="client">Client</option>
                 </select>
               </div>
               
@@ -994,7 +995,7 @@ export function Logs() {
         </div>
       )}
 
-      {viewClient && (() => {
+      {!readOnly && viewClient && (() => {
         const clientSessions = sessions.filter(session => session.app_user_id === viewClient.id);
         const clientSessionIds = new Set(clientSessions.map(session => session.id));
         const clientPayments = payments.filter(payment => payment.session_id && clientSessionIds.has(payment.session_id));

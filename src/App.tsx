@@ -6,6 +6,7 @@
  */
 import { useState, useEffect } from 'react';
 import { Sidebar, Topbar, PageContainer } from '@/components/Layout';
+import { LoginPage } from '@/components/LoginPage';
 import { Dashboard } from '@/pages/Dashboard';
 import { Statistics } from '@/pages/Statistics';
 import { SlotManagement } from '@/pages/SlotManagement';
@@ -13,6 +14,7 @@ import { Logs } from '@/pages/Logs';
 import { Settings } from '@/pages/Settings';
 import { MobileApp } from '@/pages/MobileApp';
 import { useNotifications } from '@/lib/hooks';
+import { supabase, type User } from '@/lib/supabase';
 
 /**
  * pageTitles — Maps internal page IDs to human-readable titles
@@ -28,13 +30,14 @@ const pageTitles: Record<string, string> = {
 /**
  * AdminShell — Dashboard chrome + pages.
  */
-function AdminShell({ onSwitchToMobile }: { onSwitchToMobile: () => void }) {
-  const [page, setPage] = useState('dashboard');
+function AdminShell({ user, onSignOut, onSwitchToMobile }: { user: User; onSignOut: () => void; onSwitchToMobile: () => void }) {
+  const isAdmin = user.role === 'admin';
+  const [page, setPage] = useState(isAdmin ? 'dashboard' : 'statistics');
   const [isSidebarCollapsed, setIsSidebarCollapsed] = useState(() => {
     return localStorage.getItem('plp_sidebar_collapsed') === 'true';
   });
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
-  const { notifications, markAllRead } = useNotifications();
+  const { notifications, markAllRead } = useNotifications(isAdmin);
 
   const handleToggleSidebar = () => {
     setIsSidebarCollapsed(prev => {
@@ -46,15 +49,18 @@ function AdminShell({ onSwitchToMobile }: { onSwitchToMobile: () => void }) {
 
   return (
     <>
-      <div className="app-toggle-bar">
-        <button className="app-toggle-btn active">Admin Dashboard</button>
-        <button className="app-toggle-btn" onClick={onSwitchToMobile}>Mobile App</button>
-      </div>
+      {isAdmin && (
+        <div className="app-toggle-bar">
+          <button className="app-toggle-btn active">Admin Dashboard</button>
+          <button className="app-toggle-btn" onClick={onSwitchToMobile}>Mobile App</button>
+        </div>
+      )}
 
       <div className="app-shell">
         <Sidebar
           currentPage={page}
           isCollapsed={isSidebarCollapsed}
+          isAdmin={isAdmin}
           onToggleCollapse={handleToggleSidebar}
           onNavigate={setPage}
           onOpenSettings={() => setIsSettingsOpen(true)}
@@ -63,20 +69,23 @@ function AdminShell({ onSwitchToMobile }: { onSwitchToMobile: () => void }) {
         <div className="main-area">
           <Topbar
             title={pageTitles[page] || ''}
-            notifications={notifications}
+            notifications={isAdmin ? notifications : []}
             onMarkAllRead={markAllRead}
+            userName={user.full_name}
+            userRole={isAdmin ? 'Administrator' : 'Client'}
+            onSignOut={onSignOut}
           />
 
           <PageContainer className={page === 'dashboard' ? 'dashboard-page-container' : ''}>
             {page === 'dashboard' && <Dashboard />}
             {page === 'slots' && <SlotManagement />}
             {page === 'statistics' && <Statistics />}
-            {page === 'logs' && <Logs />}
+            {page === 'logs' && <Logs readOnly={!isAdmin} />}
           </PageContainer>
         </div>
       </div>
 
-      {isSettingsOpen && (
+      {isAdmin && isSettingsOpen && (
         <div className="settings-overlay" onClick={() => setIsSettingsOpen(false)}>
           <div className="settings-container" onClick={e => e.stopPropagation()}>
             <div className="settings-header">
@@ -96,6 +105,52 @@ function AdminShell({ onSwitchToMobile }: { onSwitchToMobile: () => void }) {
  */
 function App() {
   const [view, setView] = useState<'admin' | 'mobile'>(() => new URLSearchParams(window.location.search).get('view') === 'mobile' ? 'mobile' : 'admin');
+  const [authLoading, setAuthLoading] = useState(true);
+  const [user, setUser] = useState<User | null>(null);
+  const [authError, setAuthError] = useState('');
+
+  useEffect(() => {
+    let active = true;
+    let requestId = 0;
+
+    const loadProfile = async (authUser: { id: string } | null) => {
+      const currentRequest = ++requestId;
+      if (!authUser) {
+        if (active && currentRequest === requestId) {
+          setUser(null);
+          setAuthLoading(false);
+        }
+        return;
+      }
+
+      setAuthLoading(true);
+      const { data, error } = await supabase
+        .from('users')
+        .select('*')
+        .eq('user_id', authUser.id)
+        .maybeSingle();
+
+      if (!active || currentRequest !== requestId) return;
+      if (error || !data || data.status !== 'active') {
+        setUser(null);
+        setAuthError('This account does not have an active PLPark dashboard profile.');
+      } else {
+        setUser(data as User);
+        setAuthError('');
+      }
+      setAuthLoading(false);
+    };
+
+    const { data: { subscription } } = supabase.auth.onAuthStateChange((_event, session) => {
+      void loadProfile(session?.user ? { id: session.user.id } : null);
+    });
+    void supabase.auth.getSession().then(({ data }) => loadProfile(data.session?.user ? { id: data.session.user.id } : null));
+
+    return () => {
+      active = false;
+      subscription.unsubscribe();
+    };
+  }, []);
 
   useEffect(() => {
     const userAgent = navigator.userAgent || navigator.vendor || (window as unknown as { opera?: string }).opera || '';
@@ -117,7 +172,16 @@ function App() {
     );
   }
 
-  return <AdminShell onSwitchToMobile={() => setView('mobile')} />;
+  if (authLoading) return <div className="auth-loading" role="status">Loading PLPark...</div>;
+  if (!user) return <LoginPage error={authError} />;
+
+  return (
+    <AdminShell
+      user={user}
+      onSignOut={() => void supabase.auth.signOut()}
+      onSwitchToMobile={() => setView('mobile')}
+    />
+  );
 }
 
 export default App;

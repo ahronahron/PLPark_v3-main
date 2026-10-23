@@ -171,15 +171,16 @@ export function useSessions() {
  *
  * @returns {{ notifications: Notification[], markAllRead: () => Promise<void> }}
  */
-export function useNotifications() {
+export function useNotifications(enabled = true) {
   const [notifications, setNotifications] = useState<Notification[]>([]);
 
   useEffect(() => {
+    if (!enabled) return;
     // Fetch all notifications ordered by creation date (newest first)
     supabase.from('notifications').select('*').order('created_at', { ascending: false }).then(({ data }) => {
       setNotifications(data || []);
     });
-  }, []);
+  }, [enabled]);
 
   /**
    * markAllRead — Marks all unread notifications as read.

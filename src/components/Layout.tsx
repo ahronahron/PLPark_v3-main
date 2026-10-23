@@ -26,6 +26,7 @@ import {
 interface SidebarProps {
   currentPage: string;
   isCollapsed: boolean;
+  isAdmin: boolean;
   onToggleCollapse: () => void;
   onNavigate: (page: string) => void;
   onOpenSettings: () => void;
@@ -47,6 +48,7 @@ const navItems = [
 export function Sidebar({
   currentPage,
   isCollapsed,
+  isAdmin,
   onToggleCollapse,
   onNavigate,
   onOpenSettings
@@ -66,7 +68,7 @@ export function Sidebar({
 
       {/* Navigation items */}
       <nav className="sidebar-nav">
-        {navItems.map((item) => (
+        {navItems.filter(item => isAdmin || item.id === 'statistics' || item.id === 'logs').map((item) => (
           <button
             key={item.id}
             className={`nav-item ${currentPage === item.id ? 'active' : ''}`}
@@ -88,14 +90,16 @@ export function Sidebar({
         >
           {isCollapsed ? <IconChevronRight size={14} /> : <IconChevronLeft size={14} />}
         </button>
-        <button
-          className="sidebar-footer-btn"
-          onClick={onOpenSettings}
-          title="Settings"
-        >
-          <IconSettings size={18} className="nav-icon" />
-          {!isCollapsed && <span className="sidebar-footer-btn-label">Settings</span>}
-        </button>
+        {isAdmin && (
+          <button
+            className="sidebar-footer-btn"
+            onClick={onOpenSettings}
+            title="Settings"
+          >
+            <IconSettings size={18} className="nav-icon" />
+            {!isCollapsed && <span className="sidebar-footer-btn-label">Settings</span>}
+          </button>
+        )}
       </div>
     </aside>
   );
@@ -108,12 +112,15 @@ interface TopbarProps {
   title: string;
   notifications: { id: string; type: string; title: string; message: string | null; image_url?: string | null; created_at: string; is_read: boolean }[];
   onMarkAllRead: () => void;
+  userName: string;
+  userRole: string;
+  onSignOut: () => void;
 }
 
 /**
  * Topbar — Top header bar for the admin dashboard (Clean layout without search bar).
  */
-export function Topbar({ title, notifications, onMarkAllRead }: TopbarProps) {
+export function Topbar({ title, notifications, onMarkAllRead, userName, userRole, onSignOut }: TopbarProps) {
   const [isNotificationsOpen, setIsNotificationsOpen] = useState(false);
   const [selectedNotification, setSelectedNotification] = useState<TopbarProps['notifications'][number] | null>(null);
 
@@ -130,7 +137,7 @@ export function Topbar({ title, notifications, onMarkAllRead }: TopbarProps) {
 
       <div className="topbar-right">
         {/* Notification bell with unread count and dropdown */}
-        <div className={`topbar-notifications ${isNotificationsOpen ? 'open' : ''}`}>
+        {userRole === 'Administrator' && <div className={`topbar-notifications ${isNotificationsOpen ? 'open' : ''}`}>
           <button className="icon-btn notif-btn" title="Notifications" onClick={() => setIsNotificationsOpen(prev => !prev)}>
             {unreadCount > 0 && (
               <span className="notif-count">{unreadCount}</span>
@@ -157,18 +164,19 @@ export function Topbar({ title, notifications, onMarkAllRead }: TopbarProps) {
               ))}
             </div>
           </div>
-        </div>
+        </div>}
 
         {/* User profile */}
         <div className="profile-container">
           <div className="profile-trigger">
-            <div className="user-avatar">A</div>
+            <div className="user-avatar">{userName.slice(0, 1).toUpperCase()}</div>
             <div className="user-info">
-              <div className="user-name">Admin</div>
-              <div className="user-role">Administrator</div>
+              <div className="user-name">{userName}</div>
+              <div className="user-role">{userRole}</div>
             </div>
           </div>
         </div>
+        <button className="signout-btn" onClick={onSignOut} title="Sign out">Sign out</button>
       </div>
       {selectedNotification && (
         <div className="modal-overlay notification-detail-overlay" onClick={() => setSelectedNotification(null)}>
