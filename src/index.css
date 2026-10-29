@@ -2596,3 +2596,602 @@ a { color: inherit; text-decoration: none; }
   opacity: 0.55;
   cursor: not-allowed;
 }
+
+/* ============================================================
+ * CAPTURED PLATE STYLES (Trigger-based Snapshot Capture)
+ * ============================================================ */
+.captured-plate-dashboard-alert {
+  margin: 8px 12px;
+  background: rgba(15, 23, 42, 0.92);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+  border: 1px solid rgba(34, 197, 94, 0.4);
+  border-radius: 10px;
+  padding: 10px 14px;
+  box-shadow: 0 4px 20px rgba(0, 0, 0, 0.4), 0 0 15px rgba(34, 197, 94, 0.15);
+  animation: captured-plate-slide-in 0.3s cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+.captured-plate-alert-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 6px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+  padding-bottom: 4px;
+}
+
+.captured-plate-alert-title {
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: #4ade80;
+}
+
+.captured-plate-alert-close {
+  background: transparent;
+  border: none;
+  color: #94a3b8;
+  font-size: 14px;
+  cursor: pointer;
+  padding: 0 4px;
+  line-height: 1;
+  transition: color 0.15s;
+}
+
+.captured-plate-alert-close:hover {
+  color: #f1f5f9;
+}
+
+.captured-plate-alert-body {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.captured-plate-alert-thumb {
+  height: 48px;
+  max-width: 130px;
+  object-fit: cover;
+  border-radius: 6px;
+  border: 1px solid rgba(52, 211, 153, 0.4);
+  background: #020617;
+  flex-shrink: 0;
+}
+
+.captured-plate-alert-info {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+}
+
+.captured-plate-alert-plate {
+  font-family: 'JetBrains Mono', 'Fira Code', monospace;
+  font-size: 19px;
+  font-weight: 800;
+  color: #22c55e;
+  letter-spacing: 0.12em;
+  text-shadow: 0 0 10px rgba(34, 197, 94, 0.35);
+}
+
+.captured-plate-alert-badges {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.captured-badge {
+  font-size: 10.5px;
+  color: #94a3b8;
+  background: rgba(30, 41, 59, 0.8);
+  padding: 2px 7px;
+  border-radius: 5px;
+  border: 1px solid rgba(255, 255, 255, 0.06);
+}
+
+.captured-badge strong {
+  color: #f8fafc;
+}
+
+/* Floating overlay inside CameraFeed */
+.camera-captured-plate-card {
+  position: absolute;
+  top: 48px;
+  left: 10px;
+  z-index: 10;
+  background: rgba(15, 23, 42, 0.94);
+  backdrop-filter: blur(14px);
+  -webkit-backdrop-filter: blur(14px);
+  border: 1px solid rgba(34, 197, 94, 0.45);
+  border-radius: 10px;
+  padding: 10px 12px;
+  box-shadow: 0 8px 30px rgba(0, 0, 0, 0.65), 0 0 18px rgba(34, 197, 94, 0.25);
+  max-width: 320px;
+  animation: captured-plate-slide-in 0.3s cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+.captured-card-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 6px;
+  padding-bottom: 4px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+.captured-card-title {
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: #4ade80;
+}
+
+.captured-card-close {
+  background: transparent;
+  border: none;
+  color: #94a3b8;
+  font-size: 13px;
+  cursor: pointer;
+  padding: 0 4px;
+  line-height: 1;
+}
+
+.captured-card-close:hover {
+  color: #f8fafc;
+}
+
+.captured-card-body {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.captured-card-thumb {
+  height: 44px;
+  max-width: 110px;
+  object-fit: cover;
+  border-radius: 6px;
+  border: 1px solid rgba(52, 211, 153, 0.4);
+  background: #020617;
+  flex-shrink: 0;
+}
+
+.captured-card-info {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.captured-card-text {
+  font-family: 'JetBrains Mono', 'Fira Code', monospace;
+  font-size: 17px;
+  font-weight: 800;
+  color: #22c55e;
+  letter-spacing: 0.12em;
+  text-shadow: 0 0 8px rgba(34, 197, 94, 0.35);
+}
+
+.captured-card-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+}
+
+.captured-meta-badge {
+  font-size: 10px;
+  color: #94a3b8;
+  background: rgba(30, 41, 59, 0.7);
+  padding: 1px 6px;
+  border-radius: 4px;
+  border: 1px solid rgba(255, 255, 255, 0.06);
+}
+
+.captured-meta-badge strong {
+  color: #f8fafc;
+}
+
+@keyframes captured-plate-slide-in {
+  from {
+    opacity: 0;
+    transform: translateY(-8px) scale(0.97);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+
+/* ---- OCR Service Offline Badges ---- */
+.ocr-offline-badge {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  background: rgba(239, 68, 68, 0.15);
+  border: 1px solid rgba(239, 68, 68, 0.4);
+  color: #fca5a5;
+  padding: 6px 14px;
+  border-radius: 8px;
+  font-size: 12px;
+  font-weight: 600;
+  margin: 6px 14px 4px 14px;
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
+}
+
+.ocr-offline-icon {
+  font-size: 14px;
+  color: #f87171;
+}
+
+.camera-ocr-offline-badge {
+  position: absolute;
+  top: 10px;
+  left: 170px;
+  z-index: 4;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 12px;
+  border-radius: 20px;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.03em;
+  background: rgba(220, 38, 38, 0.85);
+  color: #ffffff;
+  border: 1px solid rgba(254, 202, 202, 0.4);
+  box-shadow: 0 4px 12px rgba(220, 38, 38, 0.3);
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
+}
+
+/* ============================================================
+ * FREEZE CAPTURE FLOW (capture, freeze, read, show, resume)
+ * ============================================================ */
+
+/* Shutter Flash */
+.camera-shutter-flash {
+  position: absolute;
+  inset: 0;
+  background: #ffffff;
+  z-index: 25;
+  pointer-events: none;
+  animation: shutter-flash 150ms ease-out forwards;
+}
+
+@keyframes shutter-flash {
+  0% { opacity: 0.95; }
+  100% { opacity: 0; }
+}
+
+/* Frozen frame container */
+.camera-freeze-container {
+  position: absolute;
+  inset: 0;
+  z-index: 8;
+  overflow: hidden;
+  background: #000000;
+}
+
+.camera-freeze-image {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
+
+.freeze-frame-fade-out {
+  animation: freeze-fade-out 0.3s ease-out forwards;
+}
+
+@keyframes freeze-fade-out {
+  from { opacity: 1; }
+  to { opacity: 0; }
+}
+
+/* Plate Highlight Box */
+.plate-highlight-box {
+  position: absolute;
+  border: 2.5px solid #22c55e;
+  border-radius: 4px;
+  pointer-events: none;
+  box-sizing: border-box;
+  box-shadow: 0 0 10px rgba(34, 197, 94, 0.4);
+  transition: all 0.15s ease;
+  z-index: 9;
+}
+
+.plate-highlight-badge {
+  position: absolute;
+  top: -24px;
+  left: 0;
+  background: #22c55e;
+  color: #000000;
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 10px;
+  font-weight: 800;
+  padding: 2px 7px;
+  border-radius: 3px;
+  white-space: nowrap;
+  box-shadow: 0 2px 6px rgba(0, 0, 0, 0.4);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+
+.plate-highlight-badge.retaking {
+  background: #f59e0b;
+  color: #000000;
+}
+
+/* Reading Stage: Pulsing border & sweeping scan line */
+.plate-box-pulsing {
+  border-color: #38bdf8;
+  box-shadow: 0 0 15px rgba(56, 189, 248, 0.6), inset 0 0 10px rgba(56, 189, 248, 0.3);
+  animation: plate-pulse 1s ease-in-out infinite alternate;
+}
+
+@keyframes plate-pulse {
+  0% {
+    box-shadow: 0 0 8px rgba(56, 189, 248, 0.4), inset 0 0 5px rgba(56, 189, 248, 0.2);
+  }
+  100% {
+    box-shadow: 0 0 22px rgba(56, 189, 248, 0.9), inset 0 0 14px rgba(56, 189, 248, 0.5);
+  }
+}
+
+.plate-scan-line {
+  position: absolute;
+  left: 0;
+  right: 0;
+  height: 3px;
+  background: linear-gradient(90deg, transparent, #38bdf8, #ffffff, #38bdf8, transparent);
+  box-shadow: 0 0 10px #38bdf8, 0 0 16px #38bdf8;
+  animation: scan-sweep 1.2s ease-in-out infinite alternate;
+}
+
+@keyframes scan-sweep {
+  0% {
+    top: 0%;
+    opacity: 0.8;
+  }
+  100% {
+    top: calc(100% - 3px);
+    opacity: 1;
+  }
+}
+
+/* Reading overlay banner */
+.camera-reading-banner {
+  position: absolute;
+  bottom: 18px;
+  left: 50%;
+  transform: translateX(-50%);
+  background: rgba(15, 23, 42, 0.92);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+  border: 1px solid rgba(56, 189, 248, 0.45);
+  border-radius: 8px;
+  padding: 8px 16px;
+  color: #e0f2fe;
+  font-size: 13px;
+  font-weight: 600;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  z-index: 12;
+  box-shadow: 0 4px 20px rgba(0, 0, 0, 0.6);
+  white-space: nowrap;
+}
+
+.camera-reading-spinner {
+  width: 14px;
+  height: 14px;
+  border: 2px solid rgba(56, 189, 248, 0.3);
+  border-top-color: #38bdf8;
+  border-radius: 50%;
+  animation: reading-spin 0.8s linear infinite;
+}
+
+@keyframes reading-spin {
+  to { transform: rotate(360deg); }
+}
+
+.reading-elapsed-time {
+  color: #38bdf8;
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 12px;
+  background: rgba(56, 189, 248, 0.15);
+  padding: 2px 6px;
+  border-radius: 4px;
+}
+
+/* Result Stage: Card & Typewriter plate display */
+.camera-result-card {
+  position: absolute;
+  bottom: 16px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 12;
+  background: rgba(15, 23, 42, 0.94);
+  backdrop-filter: blur(14px);
+  -webkit-backdrop-filter: blur(14px);
+  border: 1px solid rgba(34, 197, 94, 0.5);
+  border-radius: 12px;
+  padding: 12px 20px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  box-shadow: 0 8px 30px rgba(0, 0, 0, 0.7), 0 0 18px rgba(34, 197, 94, 0.25);
+  animation: result-pop-in 0.25s cubic-bezier(0.16, 1, 0.3, 1);
+  min-width: 260px;
+}
+
+@keyframes result-pop-in {
+  0% {
+    opacity: 0;
+    transform: translateX(-50%) scale(0.92);
+  }
+  100% {
+    opacity: 1;
+    transform: translateX(-50%) scale(1);
+  }
+}
+
+.plate-styled-box {
+  background: #020617;
+  border: 2px solid #22c55e;
+  border-radius: 8px;
+  padding: 6px 16px;
+  font-family: 'JetBrains Mono', 'Fira Code', monospace;
+  font-size: 24px;
+  font-weight: 800;
+  color: #22c55e;
+  letter-spacing: 0.15em;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  text-shadow: 0 0 10px rgba(34, 197, 94, 0.4);
+}
+
+.typewriter-char {
+  display: inline-block;
+  opacity: 0;
+  animation: char-fade-in 0.1s forwards;
+}
+
+@keyframes char-fade-in {
+  0% {
+    opacity: 0;
+    transform: translateY(4px);
+  }
+  100% {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.plate-check-icon {
+  color: #22c55e;
+  font-weight: 900;
+  font-size: 18px;
+  margin-right: 4px;
+}
+
+.plate-conf-wrapper {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 11px;
+  color: #94a3b8;
+}
+
+.plate-conf-bar-bg {
+  flex: 1;
+  height: 6px;
+  background: rgba(255, 255, 255, 0.1);
+  border-radius: 3px;
+  overflow: hidden;
+}
+
+.plate-conf-bar-fill {
+  height: 100%;
+  background: linear-gradient(90deg, #10b981, #22c55e);
+  border-radius: 3px;
+  transition: width 0.4s ease-out;
+}
+
+.badge-registered {
+  background: rgba(6, 182, 212, 0.2);
+  color: #22d3ee;
+  border: 1px solid rgba(6, 182, 212, 0.4);
+  font-size: 11px;
+  font-weight: 700;
+  padding: 2px 8px;
+  border-radius: 12px;
+}
+
+.badge-guest {
+  background: rgba(245, 158, 11, 0.2);
+  color: #fbbf24;
+  border: 1px solid rgba(245, 158, 11, 0.4);
+  font-size: 11px;
+  font-weight: 700;
+  padding: 2px 8px;
+  border-radius: 12px;
+}
+
+.plate-unreadable-badge {
+  background: rgba(245, 158, 11, 0.2);
+  color: #fbbf24;
+  border: 1px solid rgba(245, 158, 11, 0.5);
+  padding: 8px 16px;
+  border-radius: 8px;
+  font-size: 13px;
+  font-weight: 700;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+/* Resume: Ready Indicator */
+.resume-ready-indicator {
+  position: absolute;
+  top: 16px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 15;
+  background: rgba(16, 185, 129, 0.92);
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
+  color: #ffffff;
+  padding: 6px 18px;
+  border-radius: 20px;
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  box-shadow: 0 4px 14px rgba(16, 185, 129, 0.4);
+  animation: ready-fade 1.5s ease-out forwards;
+}
+
+@keyframes ready-fade {
+  0% {
+    opacity: 0;
+    transform: translate(-50%, -10px);
+  }
+  15% {
+    opacity: 1;
+    transform: translate(-50%, 0);
+  }
+  75% {
+    opacity: 1;
+  }
+  100% {
+    opacity: 0;
+    transform: translate(-50%, -6px);
+  }
+}
+
+/* Honor prefers-reduced-motion */
+@media (prefers-reduced-motion: reduce) {
+  .camera-shutter-flash,
+  .plate-scan-line,
+  .plate-box-pulsing,
+  .typewriter-char,
+  .freeze-frame-fade-out,
+  .resume-ready-indicator,
+  .camera-result-card,
+  .camera-reading-spinner {
+    animation: none !important;
+    transition: none !important;
+  }
+  .typewriter-char {
+    opacity: 1 !important;
+    transform: none !important;
+  }
+}
+
+

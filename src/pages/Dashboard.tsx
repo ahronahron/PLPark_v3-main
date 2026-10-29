@@ -12,7 +12,7 @@
  *   - Clean Manual Entry (Plate, Vehicle Type, Auto-Timestamp)
  *   - Search-based Manual Exit with Payment Status, Manual Payment, and Exit Confirmation
  */
-import { useEffect, useState, useCallback } from 'react';
+import { useEffect, useState, useCallback, useRef } from 'react';
 import {
   logActivity,
   supabase,
@@ -37,7 +37,7 @@ import {
   IconClock
 } from '@/components/Icons';
 import { CameraFeed } from '@/components/CameraFeed';
-import type { EntranceResult, ExitResult } from '@/lib/visionEngine';
+import { SNAPSHOT_CONFIG, easyOcrHealth, formatPlateForDisplay, type EntranceResult, type ExitResult } from '@/lib/visionEngine';
 import { settleRegisteredSessionWallet } from '@/lib/wallet';
 import { calculateBillableHours, calculateParkingFee } from '@/lib/parkingFees';
 
@@ -73,6 +73,29 @@ export function Dashboard() {
     imageUrl: string;
     confidence: number;
   } | null>(null);
+
+  /** Captured Plate card state — keeps showing last capture until next vehicle event */
+  const [capturedPlate, setCapturedPlate] = useState<{
+    text: string;
+    confidence: number;
+    attempts: number;
+    timeTakenMs: number;
+    image: string;
+    status: string;
+    time: string;
+    direction: 'entrance' | 'exit';
+    unreadable?: boolean;
+    incomplete?: boolean;
+    reason?: string;
+  } | null>(null);
+
+  const [isOcrOnline, setIsOcrOnline] = useState<boolean>(() => easyOcrHealth.isOnline);
+
+  useEffect(() => {
+    easyOcrHealth.checkReachability();
+    const unsub = easyOcrHealth.subscribe(online => setIsOcrOnline(online));
+    return unsub;
+  }, []);
 
   /** Modals */
   const [isEntryModalOpen, setIsEntryModalOpen] = useState(false);
@@ -176,6 +199,24 @@ export function Dashboard() {
   const handleEntranceResult = useCallback((result: EntranceResult) => {
     console.log('[Dashboard] Entrance detection:', result.plateNumber, 'guest=', !result.isPrivate, 'mode=', visitorEntryMode);
 
+    // Show chosen snapshot frame in "Captured plate" card until the next capture occurs
+    const chosenImage = result.capturedImage || result.plateSnapshotUrl || result.snapshotUrl;
+    if (chosenImage || result.plateNumber) {
+      setCapturedPlate({
+        text: result.plateNumber,
+        confidence: result.confidence,
+        attempts: result.attempts || 1,
+        timeTakenMs: result.timeTakenMs || 0,
+        image: chosenImage || '',
+        status: result.unreadable ? 'Manual Entry' : (result.incomplete ? 'Incomplete' : (result.isPrivate ? 'Registered' : 'Guest')),
+        time: new Date().toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', second: '2-digit' }),
+        direction: 'entrance',
+        unreadable: result.unreadable,
+        incomplete: result.incomplete,
+        reason: result.reason,
+      });
+    }
+
     if (!result.isPrivate && !visitorEntryMode) {
       setGuestReviewRequest({
         plateNumber: result.plateNumber,
@@ -191,6 +232,25 @@ export function Dashboard() {
 
   const handleExitResult = useCallback((result: ExitResult) => {
     console.log('[Dashboard] Exit detection:', result.plateNumber, result.totalAmount);
+
+    // Show chosen snapshot frame in "Captured plate" card until the next capture occurs
+    const chosenImage = result.capturedImage || result.plateSnapshotUrl || result.snapshotUrl;
+    if (chosenImage || result.plateNumber) {
+      setCapturedPlate({
+        text: result.plateNumber,
+        confidence: result.confidence,
+        attempts: result.attempts || 1,
+        timeTakenMs: result.timeTakenMs || 0,
+        image: chosenImage || '',
+        status: result.unreadable ? 'Manual Entry' : (result.incomplete ? 'Incomplete' : 'Exit Validated'),
+        time: new Date().toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', second: '2-digit' }),
+        direction: 'exit',
+        unreadable: result.unreadable,
+        incomplete: result.incomplete,
+        reason: result.reason,
+      });
+    }
+
     refreshData();
   }, [refreshData]);
 
@@ -625,6 +685,71 @@ export function Dashboard() {
             </div>
           </div>
 
+          {/* OCR Service Offline Badge */}
+          {!isOcrOnline && (
+            <div className="ocr-offline-badge animate-fade-in" role="alert">
+              <span className="ocr-offline-icon">⚠</span>
+              <span>OCR service offline - using slower fallback</span>
+            </div>
+          )}
+
+          {/* Captured plate card (persists until next vehicle event) */}
+          {capturedPlate && (
+            <div className="captured-plate-dashboard-alert animate-fade-in">
+              <div className="captured-plate-alert-header">
+                <span className="captured-plate-alert-title">
+                  📸 Captured plate {capturedPlate.direction === 'entrance' ? '(Entrance)' : '(Exit)'}
+                </span>
+                <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                  <span style={{ fontSize: '11px', color: '#94a3b8' }}>{capturedPlate.time}</span>
+                  <button
+                    type="button"
+                    className="captured-plate-alert-close"
+                    onClick={() => setCapturedPlate(null)}
+                    title="Dismiss"
+                  >
+                    ✕
+                  </button>
+                </div>
+              </div>
+              <div className="captured-plate-alert-body">
+                {capturedPlate.image && (
+                  <img
+                    src={capturedPlate.image}
+                    alt={`Plate ${capturedPlate.text}`}
+                    className="captured-plate-alert-thumb"
+                  />
+                )}
+                <div className="captured-plate-alert-info">
+                  <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+                    <div className="captured-plate-alert-plate">{formatPlateForDisplay(capturedPlate.text)}</div>
+                    {capturedPlate.unreadable ? (
+                      <span className="plate-unreadable-badge" style={{ padding: '2px 8px', fontSize: '11px' }}>
+                        ⚠ Could not read — manual entry
+                      </span>
+                    ) : capturedPlate.incomplete ? (
+                      <span className="plate-unreadable-badge" style={{ padding: '2px 8px', fontSize: '11px', background: 'rgba(217, 119, 6, 0.95)', borderColor: '#f59e0b' }}>
+                        ⚠ Incomplete ({capturedPlate.reason || 'partial'}) — manual entry
+                      </span>
+                    ) : (
+                      <span className={capturedPlate.status === 'Registered' ? 'badge-registered' : (capturedPlate.status === 'Guest' ? 'badge-guest' : 'badge-registered')}>
+                        {capturedPlate.status}
+                      </span>
+                    )}
+                  </div>
+                  <div className="captured-plate-alert-badges">
+                    <span className="captured-badge conf">Confidence: <strong>{capturedPlate.confidence}%</strong></span>
+                    <span className="captured-badge attempts">Attempts: <strong>{capturedPlate.attempts}</strong></span>
+                    {capturedPlate.timeTakenMs > 0 && (
+                      <span className="captured-badge time">Time taken: <strong>{capturedPlate.timeTakenMs}ms</strong></span>
+                    )}
+                    <span className="captured-badge time">Captured: <strong>{capturedPlate.time}</strong></span>
+                  </div>
+                </div>
+              </div>
+            </div>
+          )}
+
           {/* Camera Feed Viewport */}
           <div className="camera-viewport">
             {(cameraTab === 'entrance' || cameraTab === 'exit') ? (
@@ -734,7 +859,7 @@ export function Dashboard() {
                 title="Click for full recognition details"
               >
                 <div className="rec-item-left">
-                  <div className="rec-compact-plate">{r.plate_number}</div>
+                  <div className="rec-compact-plate">{formatPlateForDisplay(r.plate_number)}</div>
                   <div className="rec-compact-sub">
                     <span>{r.vehicle_type}</span>
                     <span>•</span>
@@ -776,7 +901,7 @@ export function Dashboard() {
                   <div className="quick-look-icon-placeholder"><IconCar size={36} /></div>
                 )}
                 <div className="quick-look-plate-info">
-                  <div className="quick-look-plate">{guestReviewRequest.plateNumber}</div>
+                  <div className="quick-look-plate">{formatPlateForDisplay(guestReviewRequest.plateNumber)}</div>
                   <div className="quick-look-type-row">
                     <span className="quick-look-type">{guestReviewRequest.vehicleType}</span>
                     <span className="quick-look-conf">Confidence: {guestReviewRequest.confidence}%</span>
@@ -833,7 +958,7 @@ export function Dashboard() {
                 )}
 
                 <div className="quick-look-plate-info">
-                  <div className="quick-look-plate">{selectedRecognition.plate_number}</div>
+                  <div className="quick-look-plate">{formatPlateForDisplay(selectedRecognition.plate_number)}</div>
                   <div className="quick-look-type-row">
                     <span className="quick-look-type">{selectedRecognition.vehicle_type}</span>
                     <span className="quick-look-conf">Confidence: {selectedRecognition.confidence}%</span>

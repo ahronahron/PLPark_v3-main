@@ -52,13 +52,96 @@ const COCO_CLASSES = [
   'toothbrush'
 ];
 
+// ============================================================
+// SNAPSHOT & TRIGGER CONFIGURATION (Single place for tunable values)
+// ============================================================
+export const SNAPSHOT_CONFIG = {
+  /** When true, prints per-tick and detailed debug logs. When false, only logs event summary. (default: false) */
+  DEBUG: false,
+  /** Minimum plate detector confidence to trigger capture immediately (default: 0.5) */
+  CAPTURE_MIN_DET_CONF: 0.5,
+  /** Minimum detected plate box width in source pixels to trigger capture (default: 80) */
+  CAPTURE_MIN_PLATE_WIDTH_PX: 80,
+  /** Hard limit timeout for individual OCR HTTP request (default: 3000ms) */
+  READ_TIMEOUT_MS: 3000,
+  /** OCR confidence threshold to accept immediately (default: 70) */
+  ACCEPT_CONF: 70,
+  /** Maximum automatic retake attempts with progressive crop widening (default: 3) */
+  MAX_RETRIES: 3,
+  /** Duration in milliseconds to show result on frozen image and in Dashboard card (default: 2500ms) */
+  RESULT_DISPLAY_MS: 2500,
+  /** Silence duration with no plate in sight required to re-arm capture (default: 1500ms) */
+  REARM_NO_PLATE_MS: 1500,
+  /** Lockout duration to ignore repeat triggers for the same plate (default: 15000ms) */
+  LOCKOUT_MS: 15000,
+  /** Maximum width in pixels of plate crop sent to OCR (default: 480) */
+  OCR_IMAGE_MAX_WIDTH_PX: 480,
+  /** EasyOCR health check timeout in milliseconds (default: 1000) */
+  EASYOCR_HEALTH_TIMEOUT_MS: 1000,
+  /** EasyOCR health check cache TTL in milliseconds (default: 10000ms) */
+  EASYOCR_CACHE_TTL_MS: 10000,
+  /** Timeout for ONNX Runtime session creation (default: 5000ms) */
+  ORT_INIT_TIMEOUT_MS: 5000,
+  /** Aliases and legacy helper compatibility values */
+  MIN_PLATE_WIDTH_PX: 80,
+  OCR_TIMEOUT_MS: 3000,
+  DISPLAY_DURATION_MS: 2500,
+  SCORE_IMAGE_WIDTH_PX: 480,
+  MIN_BRIGHTNESS: 30,
+  MIN_CONTRAST: 20,
+  TOP_CROPS_COUNT: 3,
+  TRIGGER_TICKS: 3,
+  FAST_TRIGGER_MIN_SHARPNESS: 100,
+  STEADY_MOVE_PCT: 0.04,
+  STEADY_MIN_TIME_MS: 300,
+  BURST_FRAMES: 6,
+  BURST_TIMEOUT_MS: 1500,
+  BURST_INTERVAL_MS: 70,
+} as const;
+
+/** Crop padding stages for progressive retries (horizontal: 18% -> 28% -> 38%, vertical: 25% -> 30% -> 35%) */
+export const CROP_PADDING_STAGES = [
+  { padX: 0.18, padY: 0.25 },
+  { padX: 0.28, padY: 0.30 },
+  { padX: 0.38, padY: 0.35 },
+] as const;
+
+/**
+ * formatPlateForDisplay — Formats a raw plate string (e.g. "ABC1234", "DDD100")
+ * with a space after the letters for UI presentation ("ABC 1234", "DDD 100").
+ * Preserves the raw stored value unchanged.
+ */
+export function formatPlateForDisplay(plate: string): string {
+  if (!plate) return '';
+  const clean = plate.toUpperCase().replace(/[^A-Z0-9]/g, '');
+  // 3 letters followed by 3 or 4 digits: "ABC1234" -> "ABC 1234", "DDD100" -> "DDD 100"
+  const m3 = clean.match(/^([A-Z]{3})([0-9]{3,4})$/);
+  if (m3) return `${m3[1]} ${m3[2]}`;
+  // 2 letters followed by 4 or 5 digits: "AB1234" -> "AB 1234"
+  const m2 = clean.match(/^([A-Z]{2})([0-9]{4,5})$/);
+  if (m2) return `${m2[1]} ${m2[2]}`;
+  // General: any leading letters followed by digits: "A1234" -> "A 1234"
+  const mGen = clean.match(/^([A-Z]+)([0-9]+)$/);
+  if (mGen) return `${mGen[1]} ${mGen[2]}`;
+  return plate;
+}
+
+/** Detailed OCR result returned from EasyOCR and Tesseract readers */
+export interface OcrReadResult {
+  plate: string;
+  confidence: number;
+  complete: boolean;
+  reason: 'ok' | 'letters_only' | 'too_short' | 'no_pattern_match' | 'touches_edge' | string;
+  parts?: string[];
+}
+
 /** YOLO input dimensions */
 const MODEL_WIDTH = 640;
 const MODEL_HEIGHT = 640;
 
 /** Supabase Storage bucket name for snapshots */
 const STORAGE_BUCKET = 'vehicle-snapshots';
-const EASY_OCR_URL = import.meta.env.VITE_EASYOCR_URL || '';
+const EASY_OCR_URL = import.meta.env.VITE_EASYOCR_URL || 'http://127.0.0.1:8765';
 
 // ============================================================
 // TYPES
@@ -83,6 +166,17 @@ export interface PlateDetection {
   confidence: number;
 }
 
+/** Data emitted when a frame is frozen for capture/reading */
+export interface CapturedFrameData {
+  fullFrameDataUrl: string;
+  cropDataUrl: string;
+  plateBbox: [number, number, number, number];
+  frameWidth: number;
+  frameHeight: number;
+  attempt: number;
+  isRetake?: boolean;
+}
+
 /** Result of the entrance processing pipeline */
 export interface EntranceResult {
   plateNumber: string;
@@ -93,6 +187,20 @@ export interface EntranceResult {
   plateSnapshotUrl: string;  // Supabase Storage URL for plate crop
   isPrivate: boolean;        // matched registered vehicle
   appUserId: string | null;
+  /** Chosen captured image as data URL for instant dashboard display */
+  capturedImage?: string;
+  /** Full frame data URL */
+  fullSnapshotImage?: string;
+  /** Retake attempt count (1..MAX_RETRIES) */
+  attempts?: number;
+  /** Total time taken from trigger to OCR confirmation in milliseconds */
+  timeTakenMs?: number;
+  /** Whether the plate was unreadable after retakes */
+  unreadable?: boolean;
+  /** Whether the plate was incomplete (e.g. cut off, letters only, etc.) */
+  incomplete?: boolean;
+  /** Specific reason for incompleteness */
+  reason?: string;
 }
 
 /** Result of the exit processing pipeline */
@@ -103,6 +211,22 @@ export interface ExitResult {
   entryTime: string;
   durationHours: number;
   totalAmount: number;
+  snapshotUrl?: string;
+  plateSnapshotUrl?: string;
+  /** Chosen captured image as data URL for instant dashboard display */
+  capturedImage?: string;
+  /** Full frame data URL */
+  fullSnapshotImage?: string;
+  /** Retake attempt count (1..MAX_RETRIES) */
+  attempts?: number;
+  /** Total time taken from trigger to OCR confirmation in milliseconds */
+  timeTakenMs?: number;
+  /** Whether the plate was unreadable after retakes */
+  unreadable?: boolean;
+  /** Whether the plate was incomplete (e.g. cut off, letters only, etc.) */
+  incomplete?: boolean;
+  /** Specific reason for incompleteness */
+  reason?: string;
 }
 
 /** Camera device info */
@@ -111,14 +235,16 @@ export interface CameraDevice {
   label: string;
 }
 
-/** Pipeline status for UI feedback */
+/** Pipeline status for UI feedback representing the state machine */
 export type PipelineStatus =
   | 'idle'
   | 'loading'
   | 'scanning'
   | 'detected'
-  | 'reading_plate'
   | 'captured'
+  | 'reading'
+  | 'reading_plate'
+  | 'result'
   | 'confirmed'
   | 'processing_exit'
   | 'exit_complete'
@@ -307,9 +433,79 @@ export class ImageUploader {
  * bounding boxes, class labels, and confidence scores.
  * Bus and truck are mapped to 'car' per user requirement.
  */
+/**
+ * Creates an ONNX Runtime InferenceSession configurable via VITE_ORT_PROVIDER (default "wasm").
+ * Tries "webgpu" only when set to "webgpu", wraps session creation in a 5-second timeout (Promise.race),
+ * and falls back to "wasm" on timeout or error.
+ */
+async function createInferenceSessionWithFallback(
+  modelBuffer: ArrayBuffer,
+  modelName: string
+): Promise<{ session: ort.InferenceSession; provider: string }> {
+  ort.env.wasm.wasmPaths = 'https://cdn.jsdelivr.net/npm/onnxruntime-web@1.27.0/dist/';
+  const configuredProvider = (import.meta.env.VITE_ORT_PROVIDER || 'wasm').toLowerCase().trim();
+
+  const createWithTimeout = async (
+    provider: 'webgpu' | 'wasm',
+    timeoutMs = SNAPSHOT_CONFIG.ORT_INIT_TIMEOUT_MS
+  ): Promise<ort.InferenceSession> => {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const timeoutPromise = new Promise<never>((_, reject) => {
+      timer = setTimeout(() => {
+        reject(new Error(`${provider} session creation timed out after ${timeoutMs}ms`));
+      }, timeoutMs);
+    });
+
+    const sessionPromise = ort.InferenceSession.create(modelBuffer, {
+      executionProviders: [provider],
+      graphOptimizationLevel: 'all',
+    });
+
+    try {
+      const session = await Promise.race([sessionPromise, timeoutPromise]);
+      if (timer) clearTimeout(timer);
+      return session;
+    } catch (err) {
+      if (timer) clearTimeout(timer);
+      throw err;
+    }
+  };
+
+  // Only try webgpu if explicitly configured to 'webgpu'
+  if (configuredProvider === 'webgpu') {
+    if (typeof navigator !== 'undefined' && (navigator as any).gpu) {
+      try {
+        const session = await createWithTimeout('webgpu', SNAPSHOT_CONFIG.ORT_INIT_TIMEOUT_MS);
+        console.log(`[Snapshot] ${modelName}: using execution provider 'webgpu'`);
+        return { session, provider: 'webgpu' };
+      } catch (gpuErr) {
+        console.warn(`[Snapshot] ${modelName}: WebGPU provider failed or timed out (${SNAPSHOT_CONFIG.ORT_INIT_TIMEOUT_MS}ms), falling back to 'wasm':`, gpuErr);
+      }
+    } else {
+      console.log(`[Snapshot] ${modelName}: WebGPU not available in browser, falling back to 'wasm'`);
+    }
+  }
+
+  // Fallback or default to 'wasm'
+  try {
+    const session = await createWithTimeout('wasm', SNAPSHOT_CONFIG.ORT_INIT_TIMEOUT_MS);
+    console.log(`[Snapshot] ${modelName}: using execution provider 'wasm'`);
+    return { session, provider: 'wasm' };
+  } catch (wasmTimeoutErr) {
+    console.warn(`[Snapshot] ${modelName}: wasm create timed out or errored, attempting standard create:`, wasmTimeoutErr);
+    const session = await ort.InferenceSession.create(modelBuffer, {
+      executionProviders: ['wasm'],
+      graphOptimizationLevel: 'all',
+    });
+    console.log(`[Snapshot] ${modelName}: using execution provider 'wasm'`);
+    return { session, provider: 'wasm' };
+  }
+}
+
 export class YOLODetector {
   private session: ort.InferenceSession | null = null;
   private _isLoaded = false;
+  private provider = 'wasm';
 
   /** Whether the model has been loaded successfully */
   get isLoaded(): boolean {
@@ -318,7 +514,7 @@ export class YOLODetector {
 
   /**
    * loadModel — Uses the Python YOLO service when configured, otherwise falls
-   * back to the legacy browser ONNX detector for compatibility.
+   * back to the browser ONNX detector trying 'webgpu' first, then 'wasm'.
    */
   async loadModel(modelPath = '/models/yolov8n.onnx'): Promise<void> {
     const pythonUrl = import.meta.env.VITE_SLOT_MONITOR_URL || '';
@@ -330,22 +526,17 @@ export class YOLODetector {
     }
 
     try {
-      // Configure ONNX Runtime WASM paths to match installed version (1.27.0)
-      ort.env.wasm.wasmPaths = 'https://cdn.jsdelivr.net/npm/onnxruntime-web@1.27.0/dist/';
-
-      // Fetch model as ArrayBuffer to avoid Vite dev server interference
       const response = await fetch(modelPath);
       if (!response.ok) {
         throw new Error(`Failed to fetch model: ${response.status} ${response.statusText}`);
       }
       const modelBuffer = await response.arrayBuffer();
 
-      this.session = await ort.InferenceSession.create(modelBuffer, {
-        executionProviders: ['wasm'],
-        graphOptimizationLevel: 'all',
-      });
+      const { session, provider } = await createInferenceSessionWithFallback(modelBuffer, 'YOLODetector');
+      this.session = session;
+      this.provider = provider;
       this._isLoaded = true;
-      console.log('[YOLODetector] Model loaded successfully');
+      console.log(`[YOLODetector] Model loaded successfully (${provider})`);
     } catch (err) {
       console.error('[YOLODetector] Failed to load model:', err);
       throw err;
@@ -631,23 +822,25 @@ export class YOLODetector {
 class PlateDetector {
   private session: ort.InferenceSession | null = null;
   private _isLoaded = false;
+  private provider = 'wasm';
+  public lastInferenceMs = 0;
 
   get isLoaded(): boolean { return this._isLoaded; }
+  get executionProvider(): string { return this.provider; }
 
   async loadModel(modelPath = '/models/license_plate_detector.onnx'): Promise<void> {
     const response = await fetch(modelPath);
     if (!response.ok) throw new Error(`Plate detector unavailable: ${response.status}`);
     const buffer = await response.arrayBuffer();
-    ort.env.wasm.wasmPaths = 'https://cdn.jsdelivr.net/npm/onnxruntime-web@1.27.0/dist/';
-    this.session = await ort.InferenceSession.create(buffer, {
-      executionProviders: ['wasm'],
-      graphOptimizationLevel: 'all',
-    });
+    const { session, provider } = await createInferenceSessionWithFallback(buffer, 'PlateDetector');
+    this.session = session;
+    this.provider = provider;
     this._isLoaded = true;
   }
 
   async detect(imageData: ImageData, threshold = 0.30): Promise<PlateDetection[]> {
     if (!this.session) return [];
+    const t0 = performance.now();
     const canvas = document.createElement('canvas');
     canvas.width = MODEL_WIDTH;
     canvas.height = MODEL_HEIGHT;
@@ -674,6 +867,7 @@ class PlateDetector {
     }
     const tensor = new ort.Tensor('float32', input, [1, 3, MODEL_HEIGHT, MODEL_WIDTH]);
     const result = await this.session.run({ [this.session.inputNames[0]]: tensor });
+    this.lastInferenceMs = Math.round(performance.now() - t0);
     const output = result[this.session.outputNames[0]];
     const data = output.data as Float32Array;
     const count = Math.floor(data.length / 5);
@@ -741,11 +935,16 @@ class PlateDetector {
   }
 }
 
-/** Crop and normalize an exact plate detector box for OCR. */
-function cropDetectedPlate(sourceCanvas: HTMLCanvasElement, bbox: [number, number, number, number]): HTMLCanvasElement | null {
+/** Crop and normalize an exact plate detector box for OCR. Supports configurable padding percentages. */
+function cropDetectedPlate(
+  sourceCanvas: HTMLCanvasElement,
+  bbox: [number, number, number, number],
+  padXPct: number = 0.18,
+  padYPct: number = 0.25
+): HTMLCanvasElement | null {
   const [rawX1, rawY1, rawX2, rawY2] = bbox.map(Math.round);
-  const paddingX = Math.round((rawX2 - rawX1) * 0.18);
-  const paddingY = Math.round((rawY2 - rawY1) * 0.25);
+  const paddingX = Math.round((rawX2 - rawX1) * padXPct);
+  const paddingY = Math.round((rawY2 - rawY1) * padYPct);
   const x1 = Math.max(0, rawX1 - paddingX);
   const y1 = Math.max(0, rawY1 - paddingY);
   const x2 = Math.min(sourceCanvas.width, rawX2 + paddingX);
@@ -795,6 +994,551 @@ function createOcrVariants(source: HTMLCanvasElement): HTMLCanvasElement[] {
   context.putImageData(image, 0, 0);
   variants.push(thresholdCanvas);
   return variants;
+}
+
+// ============================================================
+// IMAGE QUALITY METRICS & TRIGGER TRACKING
+// ============================================================
+
+/**
+ * Calculates sharpness (variance of the discrete Laplacian), brightness (mean intensity),
+ * and contrast (standard deviation of intensity) for an image crop.
+ */
+export function computeImageMetrics(canvas: HTMLCanvasElement): { sharpness: number; brightness: number; contrast: number } {
+  const ctx = canvas.getContext('2d');
+  if (!ctx) return { sharpness: 0, brightness: 0, contrast: 0 };
+  const width = canvas.width;
+  const height = canvas.height;
+  if (width < 3 || height < 3) return { sharpness: 0, brightness: 0, contrast: 0 };
+
+  const imgData = ctx.getImageData(0, 0, width, height);
+  const data = imgData.data;
+
+  const totalPixels = width * height;
+  const gray = new Float32Array(totalPixels);
+  let sumIntensity = 0;
+  let sumSqIntensity = 0;
+
+  for (let i = 0, j = 0; i < data.length; i += 4, j++) {
+    const val = 0.299 * data[i] + 0.587 * data[i + 1] + 0.114 * data[i + 2];
+    gray[j] = val;
+    sumIntensity += val;
+    sumSqIntensity += val * val;
+  }
+
+  const brightness = sumIntensity / totalPixels;
+  const varianceContrast = Math.max(0, (sumSqIntensity / totalPixels) - (brightness * brightness));
+  const contrast = Math.sqrt(varianceContrast);
+
+  // Discrete Laplacian kernel: [[0, 1, 0], [1, -4, 1], [0, 1, 0]]
+  let lapSum = 0;
+  let lapSqSum = 0;
+  let count = 0;
+
+  for (let y = 1; y < height - 1; y++) {
+    const rowOffset = y * width;
+    const rowAbove = (y - 1) * width;
+    const rowBelow = (y + 1) * width;
+
+    for (let x = 1; x < width - 1; x++) {
+      const center = gray[rowOffset + x];
+      const lap = gray[rowOffset + x + 1] +
+                  gray[rowOffset + x - 1] +
+                  gray[rowBelow + x] +
+                  gray[rowAbove + x] -
+                  4 * center;
+      lapSum += lap;
+      lapSqSum += lap * lap;
+      count++;
+    }
+  }
+
+  const meanLap = count > 0 ? lapSum / count : 0;
+  const sharpness = count > 0 ? Math.max(0, (lapSqSum / count) - (meanLap * meanLap)) : 0;
+
+  return { sharpness, brightness, contrast };
+}
+
+/**
+ * Downscales an image canvas to ~320px width for cheap metric scoring.
+ * Sharpness and brightness are NEVER computed on the full-resolution crop.
+ */
+export function downscaleForScoring(
+  canvas: HTMLCanvasElement,
+  targetWidth = SNAPSHOT_CONFIG.SCORE_IMAGE_WIDTH_PX
+): HTMLCanvasElement {
+  if (canvas.width <= targetWidth) return canvas;
+  const scale = targetWidth / canvas.width;
+  const small = document.createElement('canvas');
+  small.width = targetWidth;
+  small.height = Math.max(1, Math.round(canvas.height * scale));
+  const ctx = small.getContext('2d');
+  if (!ctx) return canvas;
+  ctx.drawImage(canvas, 0, 0, small.width, small.height);
+  return small;
+}
+
+/**
+ * Resizes a crop canvas so its width is at most maxWidth (default: 480px) before sending to OCR.
+ */
+export function resizeForOcr(
+  canvas: HTMLCanvasElement,
+  maxWidth = SNAPSHOT_CONFIG.OCR_IMAGE_MAX_WIDTH_PX
+): HTMLCanvasElement {
+  if (canvas.width <= maxWidth) return canvas;
+  const scale = maxWidth / canvas.width;
+  const resized = document.createElement('canvas');
+  resized.width = maxWidth;
+  resized.height = Math.max(1, Math.round(canvas.height * scale));
+  const ctx = resized.getContext('2d');
+  if (!ctx) return canvas;
+  ctx.drawImage(canvas, 0, 0, resized.width, resized.height);
+  return resized;
+}
+
+export interface ScoredCropCandidate {
+  fullCanvas: HTMLCanvasElement;
+  cropCanvas: HTMLCanvasElement;
+  sharpness: number;
+  brightness: number;
+  contrast: number;
+}
+
+/**
+ * Rates each crop by sharpness (variance of Laplacian) and discards any with
+ * very low brightness or contrast. Returns the top candidates sorted by sharpness.
+ * Sharpness and brightness are computed ONLY on a downscaled ~320px copy.
+ */
+export function scoreAndFilterCrops(
+  candidates: { fullCanvas: HTMLCanvasElement; cropCanvas: HTMLCanvasElement }[]
+): ScoredCropCandidate[] {
+  const scored: ScoredCropCandidate[] = candidates.map(c => {
+    // CHEAP SCORING: compute metrics on downscaled 320px copy
+    const downscaled = downscaleForScoring(c.cropCanvas);
+    const metrics = computeImageMetrics(downscaled);
+    return {
+      fullCanvas: c.fullCanvas,
+      cropCanvas: c.cropCanvas,
+      sharpness: metrics.sharpness,
+      brightness: metrics.brightness,
+      contrast: metrics.contrast,
+    };
+  });
+
+  const scoresReport = scored
+    .map((c, i) => `#${i + 1}: sharp=${c.sharpness.toFixed(1)}, bright=${c.brightness.toFixed(0)}, cont=${c.contrast.toFixed(0)}`)
+    .join(' | ');
+  if (SNAPSHOT_CONFIG.DEBUG) {
+    console.log(`[Snapshot] SCORES (sharpness per crop): ${scoresReport}`);
+  }
+
+  // Discard crops with low brightness or low contrast
+  const valid = scored.filter(c =>
+    c.brightness >= SNAPSHOT_CONFIG.MIN_BRIGHTNESS &&
+    c.contrast >= SNAPSHOT_CONFIG.MIN_CONTRAST
+  );
+
+  // If all were discarded, fallback to all scored crops so we don't drop everything
+  const pool = valid.length > 0 ? valid : scored;
+  pool.sort((a, b) => b.sharpness - a.sharpness);
+
+  return pool.slice(0, SNAPSHOT_CONFIG.TOP_CROPS_COUNT);
+}
+
+/**
+ * EasyOcrHealthManager — Checks reachability of EasyOCR service with a 1s timeout.
+ * If unreachable, logs a warning once, notifies UI subscribers to show badge,
+ * and causes executeTriggeredSnapshot to use single-crop Tesseract fallback.
+ */
+class EasyOcrHealthManager {
+  private _isOnline: boolean | null = null;
+  private _checkPromise: Promise<boolean> | null = null;
+  private _warned = false;
+  private _lastCheckedTimestamp = 0;
+  private listeners: ((online: boolean) => void)[] = [];
+
+  subscribe(cb: (online: boolean) => void): () => void {
+    this.listeners.push(cb);
+    if (this._isOnline !== null) {
+      cb(this._isOnline);
+    }
+    return () => {
+      this.listeners = this.listeners.filter(l => l !== cb);
+    };
+  }
+
+  get isOnline(): boolean {
+    return this._isOnline ?? true;
+  }
+
+  async checkReachability(force = false): Promise<boolean> {
+    const now = Date.now();
+    // Cache for 10 seconds: reuse cached state unless forced or TTL expired
+    if (!force && this._isOnline !== null && (now - this._lastCheckedTimestamp < SNAPSHOT_CONFIG.EASYOCR_CACHE_TTL_MS)) {
+      return this._isOnline;
+    }
+
+    if (this._checkPromise) return this._checkPromise;
+
+    this._checkPromise = (async () => {
+      const url = import.meta.env.VITE_EASYOCR_URL || 'http://127.0.0.1:8765';
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), SNAPSHOT_CONFIG.EASYOCR_HEALTH_TIMEOUT_MS);
+      try {
+        const res = await fetch(`${url.replace(/\/$/, '')}/health`, {
+          method: 'GET',
+          signal: controller.signal,
+        });
+        clearTimeout(timer);
+        const online = res.ok;
+        this._lastCheckedTimestamp = Date.now();
+        this.setOnline(online);
+        return online;
+      } catch {
+        clearTimeout(timer);
+        this._lastCheckedTimestamp = Date.now();
+        this.setOnline(false);
+        return false;
+      } finally {
+        this._checkPromise = null;
+      }
+    })();
+
+    return this._checkPromise;
+  }
+
+  private setOnline(online: boolean): void {
+    const changed = this._isOnline !== online;
+    this._isOnline = online;
+    if (!online && !this._warned) {
+      console.warn('[Snapshot] EasyOCR service unreachable (1s timeout). Using slower Tesseract fallback without retries.');
+      this._warned = true;
+    }
+    if (changed) {
+      this.listeners.forEach(cb => cb(online));
+    }
+  }
+}
+
+export const easyOcrHealth = new EasyOcrHealthManager();
+
+interface PlateHistoryEntry {
+  bbox: [number, number, number, number];
+  timestamp: number;
+  width: number;
+  cx: number;
+  cy: number;
+}
+
+/**
+ * Tracks detected plate box across ticks using elapsed time (TRIGGER_TICKS = 2, elapsed >= 200ms).
+ * Includes fast trigger (width >= 2x MIN_PLATE_WIDTH_PX and sharp enough fires on 1st tick).
+ */
+export class PlateTriggerTracker {
+  private history: PlateHistoryEntry[] = [];
+
+  reset(): void {
+    this.history = [];
+  }
+
+  get steadyCount(): number {
+    return this.history.length;
+  }
+
+  update(
+    plateBbox: [number, number, number, number] | null,
+    frameCanvas: HTMLCanvasElement
+  ): boolean {
+    const now = performance.now();
+
+    if (!plateBbox) {
+      if (this.history.length > 0 && SNAPSHOT_CONFIG.DEBUG) {
+        console.log(`[Snapshot] Tick: plate found=false, width=none, steady count=0/${SNAPSHOT_CONFIG.TRIGGER_TICKS}`);
+      }
+      this.history = [];
+      return false;
+    }
+
+    const [x1, y1, x2, y2] = plateBbox;
+    const width = x2 - x1;
+    const cx = (x1 + x2) / 2;
+    const cy = (y1 + y2) / 2;
+
+    // Minimum plate box width requirement
+    if (width < SNAPSHOT_CONFIG.MIN_PLATE_WIDTH_PX) {
+      if (SNAPSHOT_CONFIG.DEBUG) {
+        console.log(`[Snapshot] Tick: plate found=true, width=${Math.round(width)}px (<${SNAPSHOT_CONFIG.MIN_PLATE_WIDTH_PX}px), steady count=0/${SNAPSHOT_CONFIG.TRIGGER_TICKS}`);
+      }
+      this.history = [];
+      return false;
+    }
+
+    // 1. FAST TRIGGER: if plate box is wider than 2x MIN_PLATE_WIDTH_PX (160px) and sharp enough, trigger on first tick!
+    if (width >= 2 * SNAPSHOT_CONFIG.MIN_PLATE_WIDTH_PX) {
+      const crop = cropDetectedPlate(frameCanvas, plateBbox);
+      if (crop) {
+        const smallCrop = downscaleForScoring(crop);
+        const { sharpness } = computeImageMetrics(smallCrop);
+        if (sharpness >= SNAPSHOT_CONFIG.FAST_TRIGGER_MIN_SHARPNESS) {
+          if (SNAPSHOT_CONFIG.DEBUG) {
+            console.log(`[Snapshot] Tick: plate found=true, width=${Math.round(width)}px, steady count=1/${SNAPSHOT_CONFIG.TRIGGER_TICKS}`);
+          }
+          console.log(`[Snapshot] TRIGGER fired (FAST TRIGGER): width=${Math.round(width)}px >= ${2 * SNAPSHOT_CONFIG.MIN_PLATE_WIDTH_PX}px, sharpness=${sharpness.toFixed(1)} >= ${SNAPSHOT_CONFIG.FAST_TRIGGER_MIN_SHARPNESS}`);
+          this.history = [{ bbox: plateBbox, timestamp: now, width, cx, cy }];
+          return true;
+        }
+      }
+    }
+
+    // 2. STEADY TRIGGER: check elapsed time and movement across consecutive ticks
+    const maxMovePx = SNAPSHOT_CONFIG.STEADY_MOVE_PCT * frameCanvas.width;
+
+    if (this.history.length > 0) {
+      const prev = this.history[this.history.length - 1];
+      const dist = Math.hypot(cx - prev.cx, cy - prev.cy);
+      if (dist >= maxMovePx) {
+        this.history = [{ bbox: plateBbox, timestamp: now, width, cx, cy }];
+        if (SNAPSHOT_CONFIG.DEBUG) {
+          console.log(`[Snapshot] Tick: plate found=true, width=${Math.round(width)}px, steady count=1/${SNAPSHOT_CONFIG.TRIGGER_TICKS} (moved ${dist.toFixed(1)}px >= ${maxMovePx.toFixed(1)}px)`);
+        }
+        return false;
+      }
+    }
+
+    this.history.push({ bbox: plateBbox, timestamp: now, width, cx, cy });
+    if (this.history.length > SNAPSHOT_CONFIG.TRIGGER_TICKS) {
+      this.history.shift();
+    }
+
+    const count = this.history.length;
+    if (SNAPSHOT_CONFIG.DEBUG) {
+      console.log(`[Snapshot] Tick: plate found=true, width=${Math.round(width)}px, steady count=${count}/${SNAPSHOT_CONFIG.TRIGGER_TICKS}`);
+    }
+
+    if (count >= SNAPSHOT_CONFIG.TRIGGER_TICKS) {
+      const elapsedMs = now - this.history[0].timestamp;
+      if (elapsedMs >= SNAPSHOT_CONFIG.STEADY_MIN_TIME_MS) {
+        console.log(`[Snapshot] TRIGGER fired: steady for ${Math.round(elapsedMs)}ms across ${count} ticks (width=${Math.round(width)}px)`);
+        return true;
+      }
+    }
+
+    return false;
+  }
+
+  getTriggerBox(): [number, number, number, number] | null {
+    if (this.history.length === 0) return null;
+    return this.history[this.history.length - 1].bbox;
+  }
+}
+
+export interface SnapshotReadResult {
+  chosenCandidate: ScoredCropCandidate;
+  plate: string;
+  confidence: number;
+  accepted: boolean;
+  attempts: number;
+  timeTakenMs: number;
+  ocrRequestsCount: number;
+}
+
+/**
+ * Executes trigger-based burst capture, Laplacian scoring, and OCR recognition.
+ * Burst captured first, scored after on ~320px copy.
+ * Crops sent to OCR resized to <= 480px.
+ * If EasyOCR unreachable, uses single best crop on Tesseract with no retries.
+ */
+export async function executeTriggeredSnapshot(
+  cameraManager: CameraManager,
+  plateReader: PlateReader,
+  triggerBox: [number, number, number, number],
+  registeredPlatesCache: string[]
+): Promise<SnapshotReadResult | null> {
+  const pipelineStartTime = performance.now();
+  let totalOcrRequests = 0;
+
+  // 0. Check EasyOCR reachability with 1s timeout before reading
+  const isEasyOcrOnline = await easyOcrHealth.checkReachability();
+
+  let attempt = 0;
+  let bestFallback: {
+    candidate: ScoredCropCandidate;
+    plate: string;
+    confidence: number;
+    attempts: number;
+  } | null = null;
+
+  const maxAttempts = isEasyOcrOnline ? SNAPSHOT_CONFIG.MAX_RETRIES : 1;
+
+  while (attempt < maxAttempts) {
+    attempt++;
+
+    // 1. BURST: capture BURST_FRAMES full-resolution frames ~70ms apart
+    const t0Capture = performance.now();
+    const burstCandidates: { fullCanvas: HTMLCanvasElement; cropCanvas: HTMLCanvasElement }[] = [];
+
+    for (let i = 0; i < SNAPSHOT_CONFIG.BURST_FRAMES; i++) {
+      if (performance.now() - t0Capture > SNAPSHOT_CONFIG.BURST_TIMEOUT_MS) {
+        if (SNAPSHOT_CONFIG.DEBUG) {
+          console.warn(`[Snapshot] Burst capture hit ${SNAPSHOT_CONFIG.BURST_TIMEOUT_MS}ms timeout (${burstCandidates.length} frames)`);
+        }
+        break;
+      }
+      const cap = cameraManager.captureFrame();
+      if (cap) {
+        const crop = cropDetectedPlate(cap.canvas, triggerBox);
+        if (crop) {
+          burstCandidates.push({ fullCanvas: cap.canvas, cropCanvas: crop });
+        }
+      }
+      if (i < SNAPSHOT_CONFIG.BURST_FRAMES - 1) {
+        if (performance.now() - t0Capture + SNAPSHOT_CONFIG.BURST_INTERVAL_MS > SNAPSHOT_CONFIG.BURST_TIMEOUT_MS) {
+          break;
+        }
+        await new Promise(r => setTimeout(r, SNAPSHOT_CONFIG.BURST_INTERVAL_MS));
+      }
+    }
+    const burstMs = Math.round(performance.now() - t0Capture);
+    console.log(`[Snapshot] BURST captured (${burstCandidates.length} frames, ${burstMs}ms)`);
+
+    if (burstCandidates.length === 0) {
+      console.warn('[Snapshot] No valid burst frames captured on attempt', attempt);
+      continue;
+    }
+
+    // 2. SCORE: rate each crop by variance of the Laplacian (sharpness) on downscaled ~320px copy
+    const topCrops = scoreAndFilterCrops(burstCandidates);
+    if (topCrops.length === 0) {
+      console.warn('[Snapshot] No scored crops passed quality filtering on attempt', attempt);
+      continue;
+    }
+
+    // 3. READ:
+    // If EasyOCR offline: use Tesseract on single best crop only (no retries)
+    if (!isEasyOcrOnline) {
+      const top1 = topCrops[0];
+      const ocrCrop1 = resizeForOcr(top1.cropCanvas);
+      totalOcrRequests++;
+      console.log(`[Snapshot] OCR request sent: crop #1 (${ocrCrop1.width}x${ocrCrop1.height}) via Tesseract`);
+
+      const t0Ocr = performance.now();
+      const res1 = await plateReader.readWithTesseract(ocrCrop1, registeredPlatesCache);
+      const ocrMs = Math.round(performance.now() - t0Ocr);
+      console.log(`[Snapshot] OCR result: text="${res1?.plate || ''}", confidence=${res1?.confidence || 0}%, ms=${ocrMs}ms`);
+
+      const totalElapsed = Math.round(performance.now() - pipelineStartTime);
+      if (res1 && res1.confidence >= SNAPSHOT_CONFIG.ACCEPT_CONF) {
+        console.log(`[Snapshot] ACCEPT: "${res1.plate}" (confidence: ${res1.confidence}%) on attempt 1`);
+        return {
+          chosenCandidate: top1,
+          plate: res1.plate,
+          confidence: res1.confidence,
+          accepted: true,
+          attempts: 1,
+          timeTakenMs: totalElapsed,
+          ocrRequestsCount: totalOcrRequests,
+        };
+      }
+
+      console.log(`[Snapshot] MANUAL REVIEW: plate unconfirmed via Tesseract fallback: "${res1?.plate || 'none'}" (${res1?.confidence || 0}%)`);
+      return {
+        chosenCandidate: top1,
+        plate: res1?.plate || '',
+        confidence: res1?.confidence || 0,
+        accepted: false,
+        attempts: 1,
+        timeTakenMs: totalElapsed,
+        ocrRequestsCount: totalOcrRequests,
+      };
+    }
+
+    // EasyOCR is ONLINE: send crop resized to <= 480px
+    const top1 = topCrops[0];
+    const ocrCrop1 = resizeForOcr(top1.cropCanvas);
+    totalOcrRequests++;
+    console.log(`[Snapshot] OCR request sent: crop #1 (${ocrCrop1.width}x${ocrCrop1.height}) via EasyOCR`);
+
+    const t0Ocr1 = performance.now();
+    const res1 = await plateReader.confirmWithEasyOcr(ocrCrop1, registeredPlatesCache);
+    const ocrMs1 = Math.round(performance.now() - t0Ocr1);
+    console.log(`[Snapshot] OCR result: text="${res1?.plate || ''}", confidence=${res1?.confidence || 0}%, ms=${ocrMs1}ms`);
+
+    if (res1 && res1.confidence >= SNAPSHOT_CONFIG.ACCEPT_CONF) {
+      const totalElapsed = Math.round(performance.now() - pipelineStartTime);
+      console.log(`[Snapshot] ACCEPT: "${res1.plate}" (confidence: ${res1.confidence}%) on attempt ${attempt}`);
+      return {
+        chosenCandidate: top1,
+        plate: res1.plate,
+        confidence: res1.confidence,
+        accepted: true,
+        attempts: attempt,
+        timeTakenMs: totalElapsed,
+        ocrRequestsCount: totalOcrRequests,
+      };
+    }
+
+    if (res1 && (!bestFallback || res1.confidence > bestFallback.confidence)) {
+      bestFallback = { candidate: top1, plate: res1.plate, confidence: res1.confidence, attempts: attempt };
+    }
+
+    // If top 1 wasn't accepted, try top 2 crop if available
+    if (topCrops.length >= 2) {
+      const top2 = topCrops[1];
+      const ocrCrop2 = resizeForOcr(top2.cropCanvas);
+      totalOcrRequests++;
+      console.log(`[Snapshot] OCR request sent: crop #2 (${ocrCrop2.width}x${ocrCrop2.height}) via EasyOCR`);
+
+      const t0Ocr2 = performance.now();
+      const res2 = await plateReader.confirmWithEasyOcr(ocrCrop2, registeredPlatesCache);
+      const ocrMs2 = Math.round(performance.now() - t0Ocr2);
+      console.log(`[Snapshot] OCR result: text="${res2?.plate || ''}", confidence=${res2?.confidence || 0}%, ms=${ocrMs2}ms`);
+
+      if (res2 && (!bestFallback || res2.confidence > bestFallback.confidence)) {
+        bestFallback = { candidate: top2, plate: res2.plate, confidence: res2.confidence, attempts: attempt };
+      }
+
+      if (res1 && res2) {
+        const norm1 = cleanAndFormatPlate(res1.plate, registeredPlatesCache).plate;
+        const norm2 = cleanAndFormatPlate(res2.plate, registeredPlatesCache).plate;
+        if (norm1 && norm2 && norm1 === norm2) {
+          const totalElapsed = Math.round(performance.now() - pipelineStartTime);
+          const chosenConf = Math.max(res1.confidence, res2.confidence);
+          console.log(`[Snapshot] ACCEPT: "${norm1}" (matching top-1 & top-2 confidence: ${chosenConf}%) on attempt ${attempt}`);
+          return {
+            chosenCandidate: top1,
+            plate: norm1,
+            confidence: chosenConf,
+            accepted: true,
+            attempts: attempt,
+            timeTakenMs: totalElapsed,
+            ocrRequestsCount: totalOcrRequests,
+          };
+        }
+      }
+    }
+
+    if (attempt < maxAttempts) {
+      console.log(`[Snapshot] RETRY: low confidence (${res1?.confidence || 0}%), retrying burst (attempt ${attempt}/${maxAttempts})`);
+    }
+  }
+
+  // All attempts exhausted
+  const totalElapsed = Math.round(performance.now() - pipelineStartTime);
+  console.log(`[Snapshot] MANUAL REVIEW: plate unconfirmed after ${attempt} attempt(s) (best candidate: "${bestFallback?.plate || 'none'}", ${bestFallback?.confidence || 0}%)`);
+
+  if (bestFallback) {
+    return {
+      chosenCandidate: bestFallback.candidate,
+      plate: bestFallback.plate,
+      confidence: bestFallback.confidence,
+      accepted: false,
+      attempts: attempt,
+      timeTakenMs: totalElapsed,
+      ocrRequestsCount: totalOcrRequests,
+    };
+  }
+
+  return null;
 }
 
 
@@ -969,51 +1713,80 @@ export class PlateReader {
     return { plate, confidence: Math.max(40, confidence) };
   }
 
-  private async confirmWithEasyOcr(
+  /**
+   * Reads a single plate crop using Tesseract.js (single pass, fast, no variants).
+   */
+  async readWithTesseract(
     imageSource: HTMLCanvasElement,
-    registeredPlates: string[]
-  ): Promise<{ plate: string; confidence: number } | null> {
-    const image = imageSource.toDataURL('image/jpeg', 0.85);
-    console.time("[Timing] EasyOCR fetch");
-    const response = await fetch(`${EASY_OCR_URL.replace(/\/$/, '')}/read-plate`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ image, registered_plates: registeredPlates }),
-    });
-    console.timeEnd("[Timing] EasyOCR fetch");
-    if (!response.ok) return null;
-    const result = await response.json() as { plate?: string; confidence?: number };
-    if (!result.plate || result.plate.length < 3) return null;
-    return { plate: result.plate, confidence: Math.max(40, Math.min(99, Math.round(result.confidence || 0))) };
+    registeredPlates: string[] = []
+  ): Promise<OcrReadResult | null> {
+    if (!this.worker) return null;
+    try {
+      const result = await this.worker.recognize(imageSource);
+      const cleaned = cleanAndFormatPlate(result.data.text, registeredPlates);
+      const rawConf = Number(result.data.confidence || 0);
+      const confidence = Math.min(99, Math.max(40, Math.round(rawConf + cleaned.confidenceBoost)));
+      const plate = cleaned.plate;
+      if (plate.length < 3 || plate.length > 9) return null;
+      const complete = plate.length >= 5 && /[A-Z]/.test(plate) && /[0-9]/.test(plate);
+      let reason: OcrReadResult['reason'] = 'ok';
+      if (plate.length < 5) reason = 'too_short';
+      else if (!/[0-9]/.test(plate)) reason = 'letters_only';
+      else if (!/[A-Z]/.test(plate)) reason = 'no_pattern_match';
+      return { plate, confidence, complete, reason, parts: [plate] };
+    } catch (err) {
+      console.warn('[PlateReader] Tesseract read failed:', err);
+      return null;
+    }
   }
 
+  async confirmWithEasyOcr(
+    imageSource: HTMLCanvasElement,
+    registeredPlates: string[]
+  ): Promise<OcrReadResult | null> {
+    const url = import.meta.env.VITE_EASYOCR_URL || 'http://127.0.0.1:8765';
+    const image = imageSource.toDataURL('image/jpeg', 0.85);
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), SNAPSHOT_CONFIG.OCR_TIMEOUT_MS);
+    try {
+      const response = await fetch(`${url.replace(/\/$/, '')}/read-plate`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ image, registered_plates: registeredPlates }),
+        signal: controller.signal,
+      });
+      clearTimeout(timer);
+      if (!response.ok) return null;
+      const result = await response.json() as {
+        plate?: string;
+        confidence?: number;
+        complete?: boolean;
+        reason?: string;
+        parts?: string[];
+      };
+      if (!result.plate || result.plate.length < 3) return null;
+      const plate = result.plate;
+      const confidence = Math.max(40, Math.min(99, Math.round(result.confidence || 0)));
+      const complete = result.complete ?? (plate.length >= 5 && /[A-Z]/.test(plate) && /[0-9]/.test(plate));
+      const reason = result.reason ?? (complete ? 'ok' : (plate.length < 5 ? 'too_short' : (!/[0-9]/.test(plate) ? 'letters_only' : 'no_pattern_match')));
+      const parts = result.parts ?? [plate];
+      return { plate, confidence, complete, reason, parts };
+    } catch {
+      clearTimeout(timer);
+      return null;
+    }
+  }
+
+  /**
+   * @deprecated Removed from live loops. Plate reads now occur exclusively via executeTriggeredSnapshot.
+   */
   async confirmPlateAcrossFrames(
     getImage: () => HTMLCanvasElement | null,
     registeredPlates: string[] = [],
-    sampleCount = EASY_OCR_URL ? 2 : 3
+    sampleCount = SNAPSHOT_CONFIG.BURST_FRAMES
   ): Promise<{ plate: string; confidence: number } | null> {
-    const results: { plate: string; confidence: number }[] = [];
-    for (let sample = 0; sample < sampleCount; sample++) {
-      const image = getImage();
-      if (!image) continue;
-      const result = await this.confirmPlate(image, registeredPlates);
-      if (result) {
-        results.push(result);
-        if (EASY_OCR_URL && sample === 0 && result.confidence >= 85) {
-          return result;
-        }
-      }
-      if (sample < sampleCount - 1) await new Promise(resolve => setTimeout(resolve, 40));
-    }
-    if (!results.length) return null;
-    const counts = new Map<string, { count: number; confidence: number }>();
-    results.forEach(result => {
-      const current = counts.get(result.plate) || { count: 0, confidence: 0 };
-      counts.set(result.plate, { count: current.count + 1, confidence: current.confidence + result.confidence });
-    });
-    const winner = [...counts.entries()].sort((a, b) => b[1].count - a[1].count || b[1].confidence - a[1].confidence)[0];
-    if (!winner || (winner[1].count < 2 && results.length > 1)) return null;
-    return { plate: winner[0], confidence: Math.round(winner[1].confidence / winner[1].count) };
+    console.warn('[PlateReader] confirmPlateAcrossFrames is deprecated; live reads must not call this.');
+    return null;
   }
 
   async dispose(): Promise<void> {
@@ -1052,8 +1825,13 @@ export class EntranceProcessor {
   private resultCallbacks: ((result: EntranceResult) => void)[] = [];
   private frameCallbacks: (() => void)[] = [];
 
-  private _isProcessingSnapshot = false;
-  private triggerCooldown = false;
+  private captureCallbacks: ((data: CapturedFrameData) => void)[] = [];
+  private resumeCallbacks: (() => void)[] = [];
+
+  private _isProcessing = false;
+  private _isFrozen = false;
+  private isArmed = true;
+  private lastPlateSeenTime = 0;
 
   constructor() {
     this.cameraManager = new CameraManager();
@@ -1072,6 +1850,14 @@ export class EntranceProcessor {
   get isOcrReady(): boolean { return this.plateReader.isReady; }
 
   onStatusChange(cb: (status: PipelineStatus) => void): void { this.statusCallbacks.push(cb); }
+  onCapture(cb: (data: CapturedFrameData) => void): () => void {
+    this.captureCallbacks.push(cb);
+    return () => { this.captureCallbacks = this.captureCallbacks.filter(c => c !== cb); };
+  }
+  onResume(cb: () => void): () => void {
+    this.resumeCallbacks.push(cb);
+    return () => { this.resumeCallbacks = this.resumeCallbacks.filter(c => c !== cb); };
+  }
   onDetections(cb: (detections: Detection[]) => void): void { this.detectionCallbacks.push(cb); }
   onPlateDetections(cb: (plateDetections: PlateDetection[]) => void): void { this.plateDetectionsCallbacks.push(cb); }
   onResult(cb: (result: EntranceResult) => void): void { this.resultCallbacks.push(cb); }
@@ -1136,6 +1922,9 @@ export class EntranceProcessor {
       clearInterval(this.intervalId);
       this.intervalId = null;
     }
+    this._isFrozen = false;
+    this._isProcessing = false;
+    this.isArmed = true;
     this.setStatus('idle');
   }
 
@@ -1151,131 +1940,313 @@ export class EntranceProcessor {
   }
 
   /**
-   * runStreamFrame — Real-time high-speed stream plate recognition (<200ms).
-   * Immediately confirms & emits recognized plate text to UI in real-time.
+   * runStreamFrame — Executes fast live video detection loop (~300ms).
+   * 1. scanning: the live feed runs and only detection runs.
+   * As soon as plate detector finds a plate with confidence >= CAPTURE_MIN_DET_CONF (0.5)
+   * and width >= CAPTURE_MIN_PLATE_WIDTH_PX (80), captures ONE full-resolution frame immediately.
    */
   private async runStreamFrame(): Promise<void> {
-    if (this.triggerCooldown || this._isProcessingSnapshot) return;
+    if (this._isFrozen || this._isProcessing) return;
 
     const frame = this.cameraManager.captureFrame();
     if (!frame) return;
 
     try {
-      console.time("[Timing] Vehicle detect");
-      // 1. Run YOLO Vehicle Detection
-      const vehicleDetections = await this.detector.detect(frame.imageData, 0.25);
-      console.timeEnd("[Timing] Vehicle detect");
-      this._detections = vehicleDetections;
-
-      console.time("[Timing] Plate detect");
-      // 2. Run Dedicated Plate Detector
+      // 1. Plate detector runs first
       let plateDetections: PlateDetection[] = [];
       if (this.plateDetector.isLoaded) {
         plateDetections = await this.plateDetector.detect(frame.imageData, 0.25);
       }
-      console.timeEnd("[Timing] Plate detect");
       this._plateDetections = plateDetections;
 
-      // Notify UI for immediate overlay drawing
+      // 2. While waiting for a trigger, run vehicle detector only if no plate found
+      let vehicleDetections: Detection[] = [];
+      if (plateDetections.length === 0 && this.detector.isLoaded) {
+        vehicleDetections = await this.detector.detect(frame.imageData, 0.25);
+        this._detections = vehicleDetections;
+      } else {
+        vehicleDetections = this._detections;
+      }
+
+      // Notify UI for live detection overlay drawing
       this.detectionCallbacks.forEach(cb => cb(vehicleDetections));
       this.plateDetectionsCallbacks.forEach(cb => cb(plateDetections));
       this.frameCallbacks.forEach(cb => cb());
 
-      if (this._status === 'scanning' && (vehicleDetections.length > 0 || plateDetections.length > 0)) {
-        this.setStatus('detected');
+      const now = performance.now();
+      const topPlate = plateDetections[0] || null;
+
+      if (topPlate) {
+        this.lastPlateSeenTime = now;
+      } else {
+        // Rearm when no plate has been seen for REARM_NO_PLATE_MS (1500ms)
+        if (!this.isArmed && (now - this.lastPlateSeenTime >= SNAPSHOT_CONFIG.REARM_NO_PLATE_MS)) {
+          this.isArmed = true;
+          if (SNAPSHOT_CONFIG.DEBUG) {
+            console.log(`[Snapshot] Entrance re-armed: no plate seen for ${SNAPSHOT_CONFIG.REARM_NO_PLATE_MS}ms`);
+          }
+        }
       }
 
-      // 3. REAL-TIME INSTANT STREAM SCANNING:
-      if (plateDetections.length > 0 || vehicleDetections.length > 0) {
-        const topPlate = plateDetections[0];
-        const topVehicle = vehicleDetections.find(detection => detection.vehicleType !== null) || null;
-        const personOnlyFrame = vehicleDetections.some(detection => detection.className.toLowerCase() === 'person') && !topVehicle;
-        if (personOnlyFrame || (!topPlate && !topVehicle)) {
-          if (this._status !== 'scanning') this.setStatus('scanning');
-          return;
-        }
+      if (this._status === 'scanning' && (vehicleDetections.length > 0 || plateDetections.length > 0)) {
+        this.setStatus('detected');
+      } else if (this._status === 'detected' && vehicleDetections.length === 0 && plateDetections.length === 0) {
+        this.setStatus('scanning');
+      }
 
-        let bestCrop: HTMLCanvasElement | null = null;
-        if (topPlate) {
-          bestCrop = cropDetectedPlate(frame.canvas, topPlate.bbox);
-        } else if (topVehicle) {
-          bestCrop = this.cropPlateRegion(frame.canvas, topVehicle.bbox);
-        }
+      // Check if re-armed and plate meets capture threshold
+      if (!this.isArmed || !topPlate) {
+        return;
+      }
 
-        if (bestCrop) {
-          console.log(`[Timing] bestCrop dimensions: ${bestCrop.width}x${bestCrop.height}`);
-          this._isProcessingSnapshot = true;
-          this.setStatus('reading_plate');
-
-          console.time("[Timing] OCR confirm total");
-          const ocrRes = await this.plateReader.confirmPlateAcrossFrames(
-            () => {
-              const nextFrame = this.cameraManager.captureFrame();
-              return nextFrame && topPlate ? cropDetectedPlate(nextFrame.canvas, topPlate.bbox) : bestCrop;
-            },
-            this.registeredPlatesCache,
-          );
-          console.timeEnd("[Timing] OCR confirm total");
-
-          if (ocrRes && !this.lockedPlates.has(ocrRes.plate)) {
-            const plateNumber = ocrRes.plate;
-            const confidence = ocrRes.confidence;
-
-            this.triggerCooldown = true;
-            this.lockedPlates.add(plateNumber);
-            if (await this.hasActiveSession(plateNumber)) {
-              console.info(`[EntranceProcessor] Ignoring repeat entry scan for active vehicle ${plateNumber}`);
-              this._isProcessingSnapshot = false;
-              this.setStatus('scanning');
-              setTimeout(() => { this.triggerCooldown = false; }, 8000);
-              setTimeout(() => { this.lockedPlates.delete(plateNumber); }, 15000);
-              return;
-            }
-
-            this.setStatus('confirmed');
-            console.log(`[EntranceProcessor] ⚡ Real-time plate confirmed: ${plateNumber} (${confidence}%)`);
-
-            let vehicleType: 'car' | 'motorcycle' = topVehicle?.vehicleType || 'car';
-            let color = topVehicle?.color || 'White';
-
-            const { isPrivate, appUserId } = await this.lookupVehicle(plateNumber);
-
-            const result: EntranceResult = {
-              plateNumber,
-              vehicleType,
-              color,
-              confidence,
-              snapshotUrl: '',
-              plateSnapshotUrl: '',
-              isPrivate,
-              appUserId,
-            };
-
-            this._lastResult = result;
-            // INSTANTLY EMIT TO FRONT-END UI!
-            this.resultCallbacks.forEach(cb => cb(result));
-
-            // Offload database session & image uploads to background task
-            this.saveEntranceRecord(frame.canvas, bestCrop, result);
-
-            setTimeout(() => { this.triggerCooldown = false; }, 8000);
-            setTimeout(() => { this.lockedPlates.delete(plateNumber); }, 15000);
-
-            setTimeout(() => {
-              if (this._status === 'confirmed') {
-                this.setStatus('scanning');
-              }
-            }, 3000);
-          } else {
-            this.setStatus('scanning');
-          }
-
-          this._isProcessingSnapshot = false;
-        }
+      const plateWidth = topPlate.bbox[2] - topPlate.bbox[0];
+      if (
+        topPlate.confidence >= SNAPSHOT_CONFIG.CAPTURE_MIN_DET_CONF &&
+        plateWidth >= SNAPSHOT_CONFIG.CAPTURE_MIN_PLATE_WIDTH_PX
+      ) {
+        // Trigger capture immediately!
+        await this.executeFreezeCaptureFlow(frame, topPlate.bbox, vehicleDetections);
       }
     } catch (err) {
       console.error('[EntranceProcessor] Stream error:', err);
-      this._isProcessingSnapshot = false;
+    }
+  }
+
+  /**
+   * executeFreezeCaptureFlow — Full "capture, freeze, read, show, resume" flow.
+   * - 2. captured: freeze. Pause all detection. Show captured frame in camera panel with plate highlighted.
+   * - 3. reading: run OCR once (resize <= 480px). If conf < 70 or text empty, retake once or twice.
+   * - 4. result: show plate characters, confidence, and registered/guest for 2500ms. Save 1 image & 1 session.
+   * - 5. resume: return to live feed and detection. Re-arm after 1500ms no plate seen.
+   */
+  private async executeFreezeCaptureFlow(
+    initialFrame: { canvas: HTMLCanvasElement; imageData: ImageData },
+    initialPlateBbox: [number, number, number, number],
+    vehicleDetections: Detection[]
+  ): Promise<void> {
+    this._isFrozen = true;
+    this._isProcessing = true;
+    const pipelineStartTime = performance.now();
+    let totalCaptureMs = 0;
+    let totalOcrMs = 0;
+
+    try {
+      let currentFrame = initialFrame;
+      let currentBbox = initialPlateBbox;
+      const initialPadding = CROP_PADDING_STAGES[0];
+      let currentCrop = cropDetectedPlate(currentFrame.canvas, currentBbox, initialPadding.padX, initialPadding.padY);
+      let attempt = 0;
+      let ocrResult: OcrReadResult | null = null;
+      let isAccepted = false;
+
+      const isEasyOcrOnline = await easyOcrHealth.checkReachability();
+
+      while (attempt < SNAPSHOT_CONFIG.MAX_RETRIES) {
+        attempt++;
+        const paddingStage = CROP_PADDING_STAGES[Math.min(attempt - 1, CROP_PADDING_STAGES.length - 1)];
+        const t0Capture = performance.now();
+
+        if (attempt > 1) {
+          // Status back to captured with a "Retaking..." label, using a new frame with widening crop padding
+          this.setStatus('captured');
+          const freshFrame = this.cameraManager.captureFrame();
+          if (freshFrame) {
+            currentFrame = freshFrame;
+            if (this.plateDetector.isLoaded) {
+              const freshDets = await this.plateDetector.detect(freshFrame.imageData, 0.25);
+              if (freshDets.length > 0) {
+                currentBbox = freshDets[0].bbox;
+              }
+            }
+            const freshCrop = cropDetectedPlate(currentFrame.canvas, currentBbox, paddingStage.padX, paddingStage.padY);
+            if (freshCrop) currentCrop = freshCrop;
+          }
+        }
+
+        const captureMs = Math.round(performance.now() - t0Capture);
+        totalCaptureMs += captureMs;
+
+        // 2. captured: freeze. Pause all detection. Show captured frame in camera panel
+        this.setStatus('captured');
+        const fullFrameDataUrl = currentFrame.canvas.toDataURL('image/jpeg', 0.85);
+        const cropDataUrl = (currentCrop || currentFrame.canvas).toDataURL('image/jpeg', 0.85);
+
+        this.captureCallbacks.forEach(cb => cb({
+          fullFrameDataUrl,
+          cropDataUrl,
+          plateBbox: currentBbox,
+          frameWidth: currentFrame.canvas.width,
+          frameHeight: currentFrame.canvas.height,
+          attempt,
+          isRetake: attempt > 1,
+        }));
+
+        // Allow UI to render shutter flash / captured freeze state
+        await new Promise(r => setTimeout(r, attempt > 1 ? 250 : 180));
+
+        // 3. reading: run OCR once on plate crop (resize to at most 480 px wide)
+        this.setStatus('reading');
+        const t0Ocr = performance.now();
+        const ocrCrop = resizeForOcr(currentCrop || currentFrame.canvas);
+
+        if (isEasyOcrOnline) {
+          ocrResult = await this.plateReader.confirmWithEasyOcr(ocrCrop, this.registeredPlatesCache);
+        } else {
+          ocrResult = await this.plateReader.readWithTesseract(ocrCrop, this.registeredPlatesCache);
+        }
+        const ocrMs = Math.round(performance.now() - t0Ocr);
+        totalOcrMs += ocrMs;
+
+        // Log one line per read with: merged text, complete, reason, attempts
+        console.log(`[Snapshot] read: text="${ocrResult?.plate || ''}", complete=${ocrResult?.complete ?? false}, reason="${ocrResult?.reason || 'none'}", attempts=${attempt}`);
+
+        // Treat complete=false as a failed read: do not accept, do not create a session
+        if (
+          ocrResult &&
+          ocrResult.plate &&
+          ocrResult.plate.length >= 3 &&
+          ocrResult.complete === true &&
+          ocrResult.confidence >= SNAPSHOT_CONFIG.ACCEPT_CONF
+        ) {
+          isAccepted = true;
+          break;
+        }
+
+        if (SNAPSHOT_CONFIG.DEBUG && attempt < SNAPSHOT_CONFIG.MAX_RETRIES) {
+          console.log(`[Snapshot] Retrying entrance OCR (attempt ${attempt}/${SNAPSHOT_CONFIG.MAX_RETRIES}, reason=${ocrResult?.reason || 'failed'}, conf=${ocrResult?.confidence || 0}%)`);
+        }
+      }
+
+      // 2. Short-form check: if accepted result is valid 3 letters + 3 digits plate with confidence below 90, do verification read from wider crop
+      if (isAccepted && ocrResult) {
+        const isShortForm = /^[A-Z]{3}[0-9]{3}$/.test(ocrResult.plate);
+        if (isShortForm && ocrResult.confidence < 90) {
+          if (SNAPSHOT_CONFIG.DEBUG) {
+            console.log(`[Snapshot] Short-form plate "${ocrResult.plate}" (conf=${ocrResult.confidence}% < 90). Running wider verification read...`);
+          }
+          const wideCrop = cropDetectedPlate(currentFrame.canvas, currentBbox, 0.38, 0.35);
+          if (wideCrop) {
+            const wideOcrCrop = resizeForOcr(wideCrop);
+            const verifyResult = isEasyOcrOnline
+              ? await this.plateReader.confirmWithEasyOcr(wideOcrCrop, this.registeredPlatesCache)
+              : await this.plateReader.readWithTesseract(wideOcrCrop, this.registeredPlatesCache);
+            console.log(`[Snapshot] read: text="${verifyResult?.plate || ''}", complete=${verifyResult?.complete ?? false}, reason="${verifyResult?.reason || 'none'}", attempts=${attempt} (verify)`);
+            if (
+              verifyResult &&
+              verifyResult.complete &&
+              verifyResult.plate.length > ocrResult.plate.length &&
+              verifyResult.plate.startsWith(ocrResult.plate.slice(0, 3))
+            ) {
+              if (SNAPSHOT_CONFIG.DEBUG) {
+                console.log(`[Snapshot] Wider read upgraded short-form plate "${ocrResult.plate}" -> "${verifyResult.plate}" (conf=${verifyResult.confidence}%)`);
+              }
+              ocrResult = verifyResult;
+              currentCrop = wideCrop;
+            }
+          }
+        }
+      }
+
+      const totalPipelineMs = Math.round(performance.now() - pipelineStartTime);
+      const plateNumber = ocrResult?.plate || '';
+      const confidence = ocrResult?.confidence || 0;
+
+      // Print single summary line per event
+      console.log(`[Snapshot] summary: plate="${plateNumber || 'unreadable'}", confidence=${confidence}%, attempts=${attempt}, ms per stage (capture: ${totalCaptureMs}ms, OCR: ${totalOcrMs}ms, total: ${totalPipelineMs}ms)`);
+
+      // Check lockout window
+      if (isAccepted && this.lockedPlates.has(plateNumber)) {
+        if (SNAPSHOT_CONFIG.DEBUG) {
+          console.log(`[Snapshot] Plate "${plateNumber}" triggered within lockout window (${SNAPSHOT_CONFIG.LOCKOUT_MS}ms); ignoring.`);
+        }
+        return;
+      }
+
+      const topVehicle = vehicleDetections.find(d => d.vehicleType !== null) || null;
+      const vehicleType: 'car' | 'motorcycle' = topVehicle?.vehicleType || 'car';
+      const color = topVehicle?.color || 'White';
+
+      const cropDataUrl = (currentCrop || currentFrame.canvas).toDataURL('image/jpeg', 0.85);
+      const fullFrameDataUrl = currentFrame.canvas.toDataURL('image/jpeg', 0.85);
+
+      if (isAccepted) {
+        this.lockedPlates.add(plateNumber);
+        setTimeout(() => {
+          this.lockedPlates.delete(plateNumber);
+        }, SNAPSHOT_CONFIG.LOCKOUT_MS);
+
+        const { isPrivate, appUserId } = await this.lookupVehicle(plateNumber);
+
+        const result: EntranceResult = {
+          plateNumber,
+          vehicleType,
+          color,
+          confidence,
+          snapshotUrl: '',
+          plateSnapshotUrl: '',
+          isPrivate,
+          appUserId,
+          capturedImage: cropDataUrl,
+          fullSnapshotImage: fullFrameDataUrl,
+          attempts: attempt,
+          timeTakenMs: totalPipelineMs,
+        };
+
+        // 4. result: show plate characters, confidence, registered/guest on frozen image
+        this.setStatus('result');
+        this._lastResult = result;
+        this.resultCallbacks.forEach(cb => cb(result));
+
+        // Save entrance record: Upload exactly 1 image to Storage & create session
+        if (await this.hasActiveSession(plateNumber)) {
+          console.info(`[EntranceProcessor] Ignoring repeat entry scan for active vehicle ${plateNumber}`);
+        } else {
+          await this.saveEntranceRecord(currentFrame.canvas, currentCrop || currentFrame.canvas, result);
+        }
+
+        // Show for RESULT_DISPLAY_MS (2500ms)
+        await new Promise(r => setTimeout(r, SNAPSHOT_CONFIG.RESULT_DISPLAY_MS));
+      } else {
+        // Fall back to manual-review flow with partial text prefilled and flagged "incomplete"
+        const isIncomplete = ocrResult ? !ocrResult.complete : true;
+        const partialPlate = ocrResult?.plate || '';
+        const fallbackResult: EntranceResult = {
+          plateNumber: partialPlate || 'UNREADABLE',
+          vehicleType,
+          color,
+          confidence,
+          snapshotUrl: '',
+          plateSnapshotUrl: '',
+          isPrivate: false,
+          appUserId: null,
+          capturedImage: cropDataUrl,
+          fullSnapshotImage: fullFrameDataUrl,
+          attempts: attempt,
+          timeTakenMs: totalPipelineMs,
+          unreadable: !partialPlate,
+          incomplete: isIncomplete,
+          reason: ocrResult?.reason || (partialPlate ? 'incomplete' : 'unreadable'),
+        };
+
+        this.setStatus('result');
+        this._lastResult = fallbackResult;
+        this.resultCallbacks.forEach(cb => cb(fallbackResult));
+
+        await this.createManualReviewAlert(fallbackResult);
+
+        // Show for RESULT_DISPLAY_MS (2500ms)
+        await new Promise(r => setTimeout(r, SNAPSHOT_CONFIG.RESULT_DISPLAY_MS));
+      }
+    } catch (err) {
+      console.error('[Snapshot] ERROR in entrance snapshot flow:', err);
+    } finally {
+      // 5. resume: return to live feed and detection
+      this.setStatus('scanning');
+      this._isFrozen = false;
+      this._isProcessing = false;
+      this.isArmed = false;
+      this.lastPlateSeenTime = performance.now();
+      this.resumeCallbacks.forEach(cb => cb());
     }
   }
 
@@ -1318,23 +2289,55 @@ export class EntranceProcessor {
     }
   }
 
+  private async createManualReviewAlert(result: EntranceResult): Promise<void> {
+    try {
+      const imageUrl = result.plateSnapshotUrl || result.capturedImage || null;
+      const isInc = result.incomplete;
+      const title = isInc
+        ? `Manual Review Required (Incomplete): ${result.plateNumber}`
+        : `Manual Review Required: ${result.plateNumber}`;
+      const reasonStr = result.reason ? ` Reason: ${result.reason}.` : '';
+      const message = isInc
+        ? `Plate read appears incomplete (${result.plateNumber}, ${result.confidence}% conf).${reasonStr} Retried ${result.attempts || 1} time(s) with widening crop. Please verify and complete manually. Vehicle type: ${result.vehicleType}; Color: ${result.color}.`
+        : `Plate read confidence (${result.confidence}%) is below acceptance threshold (${SNAPSHOT_CONFIG.ACCEPT_CONF}%) after ${result.attempts || 1} attempt(s). Please verify manually. Vehicle type: ${result.vehicleType}; Color: ${result.color}.`;
+
+      await supabase.from('notifications').insert({
+        type: 'warning',
+        title,
+        message,
+        image_url: imageUrl,
+      });
+      await logActivity(isInc ? 'Incomplete entrance plate read' : 'Unconfirmed entrance plate read', 'Vehicle Access', {
+        plate_number: result.plateNumber,
+        vehicle_type: result.vehicleType,
+        color: result.color,
+        confidence: result.confidence,
+        attempts: result.attempts,
+        incomplete: isInc,
+        reason: result.reason,
+      });
+    } catch (err) {
+      console.error('[EntranceProcessor] Manual review alert failed:', err);
+    }
+  }
+
   private async saveEntranceRecord(
     fullCanvas: HTMLCanvasElement,
-    winningCrop: HTMLCanvasElement,
+    _winningCrop: HTMLCanvasElement,
     result: EntranceResult
-  ): Promise<void> {
+  ): Promise<string | null> {
     try {
-      const [snapshotUrl, plateSnapshotUrl] = await Promise.all([
-        this.uploader.uploadSnapshot(fullCanvas, 'entrance', result.plateNumber),
-        this.uploader.uploadSnapshot(winningCrop, 'plates', result.plateNumber),
-      ]);
+      // Phase 3 requirement: Upload exactly one image to Storage per accepted plate
+      const snapshotUrl = await this.uploader.uploadSnapshot(fullCanvas, 'entrance', result.plateNumber);
 
       result.snapshotUrl = snapshotUrl || '';
-      result.plateSnapshotUrl = plateSnapshotUrl || '';
+      result.plateSnapshotUrl = snapshotUrl || '';
 
-      await this.createSession(result);
+      const sessionId = await this.createSession(result);
+      return sessionId;
     } catch (err) {
       console.error('[EntranceProcessor] Background save error:', err);
+      return null;
     }
   }
 
@@ -1421,11 +2424,11 @@ export class EntranceProcessor {
     return Boolean(data?.some(session => session.plate_number.toUpperCase().replace(/[\s-]+/g, '') === normalizedPlate));
   }
 
-  private async createSession(result: EntranceResult): Promise<void> {
+  private async createSession(result: EntranceResult): Promise<string | null> {
     try {
       if (await this.hasActiveSession(result.plateNumber)) {
         console.info(`[EntranceProcessor] Skipping duplicate active session for ${result.plateNumber}`);
-        return;
+        return null;
       }
 
       const visitorModeEnabled = await this.getVisitorEntryMode();
@@ -1442,10 +2445,10 @@ export class EntranceProcessor {
       if (!result.isPrivate && !visitorModeEnabled) {
         await this.createGuestReviewAlert(result);
         console.log(`[EntranceProcessor] Guest entry blocked for ${result.plateNumber} because visitor mode is off.`);
-        return;
+        return null;
       }
 
-      const { error: sessionInsertError } = await supabase.from('parking_sessions').insert({
+      const { data: sessionData, error: sessionInsertError } = await supabase.from('parking_sessions').insert({
         plate_number: result.plateNumber,
         vehicle_type: result.vehicleType,
         color: result.color,
@@ -1455,11 +2458,12 @@ export class EntranceProcessor {
         status: 'active',
         entry_time: new Date().toISOString(),
         app_user_id: result.appUserId,
-      });
+      }).select('id').maybeSingle();
+
       if (sessionInsertError) {
         if (sessionInsertError.code === '23505') {
           console.info(`[EntranceProcessor] Database rejected duplicate active session for ${result.plateNumber}`);
-          return;
+          return null;
         }
         throw sessionInsertError;
       }
@@ -1471,9 +2475,19 @@ export class EntranceProcessor {
         image_url: result.plateSnapshotUrl || result.snapshotUrl || null,
       });
 
-      console.log(`[EntranceProcessor] Session created for ${result.plateNumber}`);
+      await logActivity('Vehicle Entry', 'Vehicle Access', {
+        plate_number: result.plateNumber,
+        vehicle_type: result.vehicleType,
+        color: result.color,
+        session_id: sessionData?.id || null,
+        confidence: result.confidence,
+      });
+
+      console.log(`[EntranceProcessor] Session created for ${result.plateNumber} (id: ${sessionData?.id || 'none'})`);
+      return sessionData?.id || null;
     } catch (err) {
       console.error('[EntranceProcessor] Database error:', err);
+      return null;
     }
   }
 }
@@ -1490,6 +2504,7 @@ export class ExitProcessor {
   private plateReader: PlateReader;
   private plateDetector: PlateDetector;
   private detector: YOLODetector;
+  private uploader: ImageUploader;
   private intervalId: number | null = null;
   private lockedPlates: Set<string> = new Set();
   private registeredPlatesCache: string[] = [];
@@ -1504,14 +2519,20 @@ export class ExitProcessor {
   private plateDetectionsCallbacks: ((plateDetections: PlateDetection[]) => void)[] = [];
   private frameCallbacks: (() => void)[] = [];
 
+  private captureCallbacks: ((data: CapturedFrameData) => void)[] = [];
+  private resumeCallbacks: (() => void)[] = [];
+
   private _isProcessing = false;
-  private triggerCooldown = false;
+  private _isFrozen = false;
+  private isArmed = true;
+  private lastPlateSeenTime = 0;
 
   constructor() {
     this.cameraManager = new CameraManager();
     this.plateReader = new PlateReader();
     this.plateDetector = new PlateDetector();
     this.detector = new YOLODetector();
+    this.uploader = new ImageUploader();
   }
 
   get status(): PipelineStatus { return this._status; }
@@ -1519,8 +2540,18 @@ export class ExitProcessor {
   get camera(): CameraManager { return this.cameraManager; }
   get detections(): Detection[] { return this._detections; }
   get plateDetections(): PlateDetection[] { return this._plateDetections; }
+  get isModelLoaded(): boolean { return this.detector.isLoaded; }
+  get isOcrReady(): boolean { return this.plateReader.isReady; }
 
   onStatusChange(cb: (status: PipelineStatus) => void): void { this.statusCallbacks.push(cb); }
+  onCapture(cb: (data: CapturedFrameData) => void): () => void {
+    this.captureCallbacks.push(cb);
+    return () => { this.captureCallbacks = this.captureCallbacks.filter(c => c !== cb); };
+  }
+  onResume(cb: () => void): () => void {
+    this.resumeCallbacks.push(cb);
+    return () => { this.resumeCallbacks = this.resumeCallbacks.filter(c => c !== cb); };
+  }
   onResult(cb: (result: ExitResult) => void): void { this.resultCallbacks.push(cb); }
   onDetections(cb: (detections: Detection[]) => void): void { this.detectionCallbacks.push(cb); }
   onPlateDetections(cb: (plateDetections: PlateDetection[]) => void): void { this.plateDetectionsCallbacks.push(cb); }
@@ -1581,6 +2612,9 @@ export class ExitProcessor {
       clearInterval(this.intervalId);
       this.intervalId = null;
     }
+    this._isFrozen = false;
+    this._isProcessing = false;
+    this.isArmed = true;
     this._detections = [];
     this._plateDetections = [];
     this.setStatus('idle');
@@ -1596,90 +2630,333 @@ export class ExitProcessor {
   }
 
   private async processStreamFrame(): Promise<void> {
+    if (this._isFrozen || this._isProcessing) return;
+
     const frame = this.cameraManager.captureFrame();
     if (!frame) return;
 
     try {
-      const vehicleDetections = this.detector.isLoaded
-        ? await this.detector.detect(frame.imageData, 0.25)
-        : [];
-      this._detections = vehicleDetections;
-      this.detectionCallbacks.forEach(cb => cb(vehicleDetections));
-
-      const recognizedVehicle = vehicleDetections.some(detection => detection.vehicleType !== null);
-      const personOnlyFrame = vehicleDetections.some(detection => detection.className.toLowerCase() === 'person') && !recognizedVehicle;
-      if (personOnlyFrame) {
-        this._plateDetections = [];
-        this.plateDetectionsCallbacks.forEach(cb => cb([]));
-        this.frameCallbacks.forEach(cb => cb());
-        if (this._status !== 'scanning') this.setStatus('scanning');
-        return;
-      }
-
+      // 1. Plate detector runs first
       let plateDetections: PlateDetection[] = [];
       if (this.plateDetector.isLoaded) {
         plateDetections = await this.plateDetector.detect(frame.imageData, 0.25);
       }
       this._plateDetections = plateDetections;
+
+      // 2. While waiting for a trigger, run vehicle detector only if no plate found
+      let vehicleDetections: Detection[] = [];
+      if (plateDetections.length === 0 && this.detector.isLoaded) {
+        vehicleDetections = await this.detector.detect(frame.imageData, 0.25);
+        this._detections = vehicleDetections;
+      } else {
+        vehicleDetections = this._detections;
+      }
+
+      this.detectionCallbacks.forEach(cb => cb(vehicleDetections));
       this.plateDetectionsCallbacks.forEach(cb => cb(plateDetections));
       this.frameCallbacks.forEach(cb => cb());
 
-      if (this._status === 'scanning' && plateDetections.length > 0) {
-        this.setStatus('detected');
+      const now = performance.now();
+      const topPlate = plateDetections[0] || null;
+
+      if (topPlate) {
+        this.lastPlateSeenTime = now;
+      } else {
+        // Rearm when no plate has been seen for REARM_NO_PLATE_MS (1500ms)
+        if (!this.isArmed && (now - this.lastPlateSeenTime >= SNAPSHOT_CONFIG.REARM_NO_PLATE_MS)) {
+          this.isArmed = true;
+          if (SNAPSHOT_CONFIG.DEBUG) {
+            console.log(`[Snapshot] Exit re-armed: no plate seen for ${SNAPSHOT_CONFIG.REARM_NO_PLATE_MS}ms`);
+          }
+        }
       }
 
-      if (!this.triggerCooldown && !this._isProcessing && plateDetections.length > 0 && (!vehicleDetections.length || recognizedVehicle)) {
-        const topPlate = plateDetections[0];
-        const bestCrop = cropDetectedPlate(frame.canvas, topPlate.bbox);
+      if (this._status === 'scanning' && plateDetections.length > 0) {
+        this.setStatus('detected');
+      } else if (this._status === 'detected' && plateDetections.length === 0) {
+        this.setStatus('scanning');
+      }
 
-        if (bestCrop) {
-          this._isProcessing = true;
-          this.setStatus('reading_plate');
+      if (!this.isArmed || !topPlate) {
+        return;
+      }
 
-          const ocrRes = await this.plateReader.confirmPlateAcrossFrames(
-            () => {
-              const nextFrame = this.cameraManager.captureFrame();
-              return nextFrame ? cropDetectedPlate(nextFrame.canvas, topPlate.bbox) : bestCrop;
-            },
-            this.registeredPlatesCache,
-          );
-
-          if (ocrRes && !this.lockedPlates.has(ocrRes.plate)) {
-            const exitResult = await this.processExit(ocrRes.plate, ocrRes.confidence);
-
-            if (exitResult) {
-              this.triggerCooldown = true;
-              this.lockedPlates.add(ocrRes.plate);
-              this._lastResult = exitResult;
-              this.setStatus('exit_complete');
-              // INSTANTLY EMIT TO FRONT-END UI!
-              this.resultCallbacks.forEach(cb => cb(exitResult));
-
-              setTimeout(() => { this.triggerCooldown = false; }, 8000);
-              setTimeout(() => { this.lockedPlates.delete(ocrRes.plate); }, 15000);
-
-              setTimeout(() => {
-                if (this._status === 'exit_complete') {
-                  this.setStatus('scanning');
-                }
-              }, 3000);
-            } else {
-              this.setStatus('scanning');
-            }
-          } else {
-            this.setStatus('scanning');
-          }
-
-          this._isProcessing = false;
-        }
+      const plateWidth = topPlate.bbox[2] - topPlate.bbox[0];
+      if (
+        topPlate.confidence >= SNAPSHOT_CONFIG.CAPTURE_MIN_DET_CONF &&
+        plateWidth >= SNAPSHOT_CONFIG.CAPTURE_MIN_PLATE_WIDTH_PX
+      ) {
+        await this.executeFreezeCaptureFlow(frame, topPlate.bbox);
       }
     } catch (err) {
       console.error('[ExitProcessor] Stream error:', err);
-      this._isProcessing = false;
     }
   }
 
-  private async processExit(plateNumber: string, confidence: number): Promise<ExitResult | null> {
+  private async executeFreezeCaptureFlow(
+    initialFrame: { canvas: HTMLCanvasElement; imageData: ImageData },
+    initialPlateBbox: [number, number, number, number]
+  ): Promise<void> {
+    this._isFrozen = true;
+    this._isProcessing = true;
+    const pipelineStartTime = performance.now();
+    let totalCaptureMs = 0;
+    let totalOcrMs = 0;
+
+    try {
+      let currentFrame = initialFrame;
+      let currentBbox = initialPlateBbox;
+      const initialPadding = CROP_PADDING_STAGES[0];
+      let currentCrop = cropDetectedPlate(currentFrame.canvas, currentBbox, initialPadding.padX, initialPadding.padY);
+      let attempt = 0;
+      let ocrResult: OcrReadResult | null = null;
+      let isAccepted = false;
+
+      const isEasyOcrOnline = await easyOcrHealth.checkReachability();
+
+      while (attempt < SNAPSHOT_CONFIG.MAX_RETRIES) {
+        attempt++;
+        const paddingStage = CROP_PADDING_STAGES[Math.min(attempt - 1, CROP_PADDING_STAGES.length - 1)];
+        const t0Capture = performance.now();
+
+        if (attempt > 1) {
+          this.setStatus('captured');
+          const freshFrame = this.cameraManager.captureFrame();
+          if (freshFrame) {
+            currentFrame = freshFrame;
+            if (this.plateDetector.isLoaded) {
+              const freshDets = await this.plateDetector.detect(freshFrame.imageData, 0.25);
+              if (freshDets.length > 0) {
+                currentBbox = freshDets[0].bbox;
+              }
+            }
+            const freshCrop = cropDetectedPlate(currentFrame.canvas, currentBbox, paddingStage.padX, paddingStage.padY);
+            if (freshCrop) currentCrop = freshCrop;
+          }
+        }
+
+        const captureMs = Math.round(performance.now() - t0Capture);
+        totalCaptureMs += captureMs;
+
+        // 2. captured: freeze. Pause all detection.
+        this.setStatus('captured');
+        const fullFrameDataUrl = currentFrame.canvas.toDataURL('image/jpeg', 0.85);
+        const cropDataUrl = (currentCrop || currentFrame.canvas).toDataURL('image/jpeg', 0.85);
+
+        this.captureCallbacks.forEach(cb => cb({
+          fullFrameDataUrl,
+          cropDataUrl,
+          plateBbox: currentBbox,
+          frameWidth: currentFrame.canvas.width,
+          frameHeight: currentFrame.canvas.height,
+          attempt,
+          isRetake: attempt > 1,
+        }));
+
+        await new Promise(r => setTimeout(r, attempt > 1 ? 250 : 180));
+
+        // 3. reading: run OCR once (resize <= 480px)
+        this.setStatus('reading');
+        const t0Ocr = performance.now();
+        const ocrCrop = resizeForOcr(currentCrop || currentFrame.canvas);
+
+        if (isEasyOcrOnline) {
+          ocrResult = await this.plateReader.confirmWithEasyOcr(ocrCrop, this.registeredPlatesCache);
+        } else {
+          ocrResult = await this.plateReader.readWithTesseract(ocrCrop, this.registeredPlatesCache);
+        }
+        const ocrMs = Math.round(performance.now() - t0Ocr);
+        totalOcrMs += ocrMs;
+
+        // Log one line per read with: merged text, complete, reason, attempts
+        console.log(`[Snapshot] read: text="${ocrResult?.plate || ''}", complete=${ocrResult?.complete ?? false}, reason="${ocrResult?.reason || 'none'}", attempts=${attempt}`);
+
+        // Treat complete=false as a failed read: do not accept, do not create a session
+        if (
+          ocrResult &&
+          ocrResult.plate &&
+          ocrResult.plate.length >= 3 &&
+          ocrResult.complete === true &&
+          ocrResult.confidence >= SNAPSHOT_CONFIG.ACCEPT_CONF
+        ) {
+          isAccepted = true;
+          break;
+        }
+
+        if (SNAPSHOT_CONFIG.DEBUG && attempt < SNAPSHOT_CONFIG.MAX_RETRIES) {
+          console.log(`[Snapshot] Retrying exit OCR (attempt ${attempt}/${SNAPSHOT_CONFIG.MAX_RETRIES}, reason=${ocrResult?.reason || 'failed'}, conf=${ocrResult?.confidence || 0}%)`);
+        }
+      }
+
+      // 2. Short-form check: if accepted result is valid 3 letters + 3 digits plate with confidence below 90, do verification read from wider crop
+      if (isAccepted && ocrResult) {
+        const isShortForm = /^[A-Z]{3}[0-9]{3}$/.test(ocrResult.plate);
+        if (isShortForm && ocrResult.confidence < 90) {
+          if (SNAPSHOT_CONFIG.DEBUG) {
+            console.log(`[Snapshot] Exit short-form plate "${ocrResult.plate}" (conf=${ocrResult.confidence}% < 90). Running wider verification read...`);
+          }
+          const wideCrop = cropDetectedPlate(currentFrame.canvas, currentBbox, 0.38, 0.35);
+          if (wideCrop) {
+            const wideOcrCrop = resizeForOcr(wideCrop);
+            const verifyResult = isEasyOcrOnline
+              ? await this.plateReader.confirmWithEasyOcr(wideOcrCrop, this.registeredPlatesCache)
+              : await this.plateReader.readWithTesseract(wideOcrCrop, this.registeredPlatesCache);
+            console.log(`[Snapshot] read: text="${verifyResult?.plate || ''}", complete=${verifyResult?.complete ?? false}, reason="${verifyResult?.reason || 'none'}", attempts=${attempt} (verify)`);
+            if (
+              verifyResult &&
+              verifyResult.complete &&
+              verifyResult.plate.length > ocrResult.plate.length &&
+              verifyResult.plate.startsWith(ocrResult.plate.slice(0, 3))
+            ) {
+              if (SNAPSHOT_CONFIG.DEBUG) {
+                console.log(`[Snapshot] Wider read upgraded exit short-form plate "${ocrResult.plate}" -> "${verifyResult.plate}" (conf=${verifyResult.confidence}%)`);
+              }
+              ocrResult = verifyResult;
+              currentCrop = wideCrop;
+            }
+          }
+        }
+      }
+
+      const totalPipelineMs = Math.round(performance.now() - pipelineStartTime);
+      const plateNumber = ocrResult?.plate || '';
+      const confidence = ocrResult?.confidence || 0;
+
+      // Single summary log line
+      console.log(`[Snapshot] summary: plate="${plateNumber || 'unreadable'}", confidence=${confidence}%, attempts=${attempt}, ms per stage (capture: ${totalCaptureMs}ms, OCR: ${totalOcrMs}ms, total: ${totalPipelineMs}ms)`);
+
+      // Check lockout window
+      if (isAccepted && this.lockedPlates.has(plateNumber)) {
+        if (SNAPSHOT_CONFIG.DEBUG) {
+          console.log(`[Snapshot] Exit plate "${plateNumber}" triggered within lockout window (${SNAPSHOT_CONFIG.LOCKOUT_MS}ms); ignoring.`);
+        }
+        return;
+      }
+
+      const cropDataUrl = (currentCrop || currentFrame.canvas).toDataURL('image/jpeg', 0.85);
+      const fullFrameDataUrl = currentFrame.canvas.toDataURL('image/jpeg', 0.85);
+
+      if (isAccepted) {
+        this.lockedPlates.add(plateNumber);
+        setTimeout(() => {
+          this.lockedPlates.delete(plateNumber);
+        }, SNAPSHOT_CONFIG.LOCKOUT_MS);
+
+        const exitResult = await this.processExit(plateNumber, confidence, currentFrame.canvas);
+
+        if (exitResult) {
+          exitResult.capturedImage = cropDataUrl;
+          exitResult.fullSnapshotImage = fullFrameDataUrl;
+          exitResult.attempts = attempt;
+          exitResult.timeTakenMs = totalPipelineMs;
+
+          // 4. result: show plate characters, confidence, and status on frozen image
+          this.setStatus('result');
+          this._lastResult = exitResult;
+          this.resultCallbacks.forEach(cb => cb(exitResult));
+          await new Promise(r => setTimeout(r, SNAPSHOT_CONFIG.RESULT_DISPLAY_MS));
+        } else {
+          // No active session found or payment required
+          const noSessionResult: ExitResult = {
+            plateNumber,
+            confidence,
+            sessionId: '',
+            entryTime: new Date().toISOString(),
+            durationHours: 0,
+            totalAmount: 0,
+            capturedImage: cropDataUrl,
+            fullSnapshotImage: fullFrameDataUrl,
+            attempts: attempt,
+            timeTakenMs: totalPipelineMs,
+          };
+          this.setStatus('result');
+          this._lastResult = noSessionResult;
+          this.resultCallbacks.forEach(cb => cb(noSessionResult));
+          await new Promise(r => setTimeout(r, SNAPSHOT_CONFIG.RESULT_DISPLAY_MS));
+        }
+      } else {
+        // Fall back to manual review flow with partial text prefilled and flagged "incomplete"
+        const isIncomplete = ocrResult ? !ocrResult.complete : true;
+        const partialPlate = ocrResult?.plate || '';
+        const fallbackResult: ExitResult = {
+          plateNumber: partialPlate || 'UNREADABLE',
+          confidence,
+          sessionId: '',
+          entryTime: new Date().toISOString(),
+          durationHours: 0,
+          totalAmount: 0,
+          capturedImage: cropDataUrl,
+          fullSnapshotImage: fullFrameDataUrl,
+          attempts: attempt,
+          timeTakenMs: totalPipelineMs,
+          unreadable: !partialPlate,
+          incomplete: isIncomplete,
+          reason: ocrResult?.reason || (partialPlate ? 'incomplete' : 'unreadable'),
+        };
+
+        this.setStatus('result');
+        this._lastResult = fallbackResult;
+        this.resultCallbacks.forEach(cb => cb(fallbackResult));
+
+        await this.createManualReviewAlert(
+          fallbackResult.plateNumber,
+          confidence,
+          attempt,
+          cropDataUrl,
+          isIncomplete,
+          fallbackResult.reason
+        );
+        await new Promise(r => setTimeout(r, SNAPSHOT_CONFIG.RESULT_DISPLAY_MS));
+      }
+    } catch (err) {
+      console.error('[Snapshot] ERROR in exit snapshot flow:', err);
+    } finally {
+      // 5. resume: return to live feed and detection
+      this.setStatus('scanning');
+      this._isFrozen = false;
+      this._isProcessing = false;
+      this.isArmed = false;
+      this.lastPlateSeenTime = performance.now();
+      this.resumeCallbacks.forEach(cb => cb());
+    }
+  }
+
+  private async createManualReviewAlert(
+    plateNumber: string,
+    confidence: number,
+    attempts: number,
+    cropDataUrl: string,
+    incomplete = false,
+    reason = ''
+  ): Promise<void> {
+    try {
+      const title = incomplete
+        ? `Manual Review Required (Exit - Incomplete): ${plateNumber || 'Unreadable'}`
+        : `Manual Review Required (Exit): ${plateNumber || 'Unreadable'}`;
+      const reasonStr = reason ? ` Reason: ${reason}.` : '';
+      const message = incomplete
+        ? `Exit plate read appears incomplete (${plateNumber}, ${confidence}% conf).${reasonStr} Retried ${attempts} time(s) with widening crop. Please verify and complete manually.`
+        : `Exit plate read confidence (${confidence}%) is below acceptance threshold (${SNAPSHOT_CONFIG.ACCEPT_CONF}%) after ${attempts} attempt(s). Please verify manually.`;
+
+      await supabase.from('notifications').insert({
+        type: 'warning',
+        title,
+        message,
+        image_url: cropDataUrl || null,
+      });
+      await logActivity(incomplete ? 'Incomplete exit plate read' : 'Unconfirmed exit plate read', 'Vehicle Access', {
+        plate_number: plateNumber || 'UNREADABLE',
+        confidence,
+        attempts,
+        incomplete,
+        reason,
+      });
+    } catch (err) {
+      console.error('[ExitProcessor] Manual review alert failed:', err);
+    }
+  }
+
+  private async processExit(plateNumber: string, confidence: number, fullCanvas?: HTMLCanvasElement): Promise<ExitResult | null> {
     try {
       // 1. Find active session for this plate (exact match first)
       let { data: sessions } = await supabase
@@ -1757,12 +3034,22 @@ export class ExitProcessor {
         }
       }
 
+      let snapshotUrl: string | null = null;
+      if (fullCanvas) {
+        try {
+          snapshotUrl = await this.uploader.uploadSnapshot(fullCanvas, 'exit', plateNumber);
+        } catch (uploadErr) {
+          console.warn('[ExitProcessor] Exit snapshot upload error:', uploadErr);
+        }
+      }
+
       await supabase.from('plate_recognitions').insert({
         plate_number: plateNumber,
         vehicle_type: session.vehicle_type,
         direction: 'exit',
         confidence,
         camera_name: 'Webcam Exit',
+        image_url: snapshotUrl || undefined,
       });
 
       if (!exitWasAllowed) {
@@ -1793,6 +3080,13 @@ export class ExitProcessor {
         message: `Duration: ${durationHours}h — Amount: ₱${totalAmount.toFixed(2)} — Receipt: ${receiptNum}`,
       });
 
+      await logActivity('Vehicle Exit', 'Vehicle Access', {
+        plate_number: plateNumber,
+        session_id: session.id,
+        duration_hours: durationHours,
+        total_amount: totalAmount,
+      });
+
       console.log(`[ExitProcessor] Session completed for ${plateNumber}, ₱${totalAmount.toFixed(2)}`);
 
       return {
@@ -1802,6 +3096,8 @@ export class ExitProcessor {
         entryTime: session.entry_time,
         durationHours,
         totalAmount,
+        snapshotUrl: snapshotUrl || '',
+        plateSnapshotUrl: snapshotUrl || '',
       };
     } catch (err) {
       console.error('[ExitProcessor] Process exit error:', err);
