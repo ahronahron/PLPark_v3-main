@@ -41,6 +41,7 @@ import {
 } from 'lucide-react';
 import { supabase } from '@/lib/supabase';
 import type { VehicleType, ConceptType, PaymentMethod, PaymentStatus, Direction } from '@/lib/supabase';
+import './Statistics.css';
 
 // ============================================================
 // CONSTANTS & FORMATTERS
@@ -394,7 +395,7 @@ async function exportCustomExcel(
   payments: PaymentRow[],
   options: ExportOptions,
 ) {
-  const XLSX = await import('xlsx');
+  const XLSX = await import('xlsx-js-style');
   const wb = XLSX.utils.book_new();
 
   const formattedStart = formatReadableDateTime(filters.startDate);
@@ -426,6 +427,60 @@ async function exportCustomExcel(
     }
   };
 
+  const applyWorkbookDesign = (ws: any) => {
+    if (!ws['!ref']) return;
+
+    const range = XLSX.utils.decode_range(ws['!ref']);
+    const border = {
+      bottom: { style: 'thin', color: { rgb: 'E2E8F0' } },
+    };
+
+    for (let row = range.s.r; row <= range.e.r; row++) {
+      const cells = Array.from({ length: range.e.c - range.s.c + 1 }, (_, offset) => {
+        const col = range.s.c + offset;
+        const ref = XLSX.utils.encode_cell({ r: row, c: col });
+        return { ref, cell: ws[ref] };
+      }).filter(({ cell }) => cell);
+      if (!cells.length) continue;
+
+      const values = cells.map(({ cell }) => String(cell.v ?? '').trim()).filter(Boolean);
+      const firstValue = values[0] ?? '';
+      const isBanner = cells.length === 1 && row === 0;
+      const isSection = cells.length === 1 && firstValue.length > 0 && firstValue === firstValue.toUpperCase();
+      const isHeader = ['metric', 'period', 'hour (24h)', 'duration bracket', 'concept type', 'vehicle type', 'session id']
+        .includes(firstValue.toLowerCase());
+      const isTotal = /^(TOTAL|GRAND TOTAL|TOTAL ANALYZED)\b/i.test(firstValue);
+
+      for (const { ref, cell } of cells) {
+        const style: Record<string, unknown> = {
+          font: { name: 'Aptos', sz: 10, color: { rgb: '1E293B' } },
+          alignment: { vertical: 'center', wrapText: true },
+          border,
+        };
+        if (isBanner) {
+          style.fill = { fgColor: { rgb: '0F2747' } };
+          style.font = { name: 'Aptos Display', sz: row === 1 ? 16 : 10, bold: true, color: { rgb: 'FFFFFF' } };
+          style.alignment = { vertical: 'center', horizontal: 'left', indent: 1 };
+        } else if (isHeader) {
+          style.fill = { fgColor: { rgb: '1D4ED8' } };
+          style.font = { name: 'Aptos', sz: 10, bold: true, color: { rgb: 'FFFFFF' } };
+          style.alignment = { vertical: 'center', horizontal: 'center', wrapText: true };
+        } else if (isSection) {
+          style.fill = { fgColor: { rgb: 'DBEAFE' } };
+          style.font = { name: 'Aptos', sz: 10, bold: true, color: { rgb: '1E3A8A' } };
+        } else if (isTotal) {
+          style.fill = { fgColor: { rgb: 'EFF6FF' } };
+          style.font = { name: 'Aptos', sz: 10, bold: true, color: { rgb: '1E3A8A' } };
+        } else if (row % 2 === 0) {
+          style.fill = { fgColor: { rgb: 'F8FAFC' } };
+        }
+        cell.s = style;
+      }
+    }
+
+    ws['!sheetViews'] = [{ showGridLines: false }];
+  };
+
   // 1. EXECUTIVE SUMMARY SHEET
   if (options.executiveSummary) {
     const sumRows: (string | number)[][] = [
@@ -452,7 +507,7 @@ async function exportCustomExcel(
       [],
       ['OPERATIONAL SUMMARY HIGHLIGHTS'],
       ['Top Revenue Vehicle Class', fleetDetailed.reduce((top, f) => (f.revenue > top.revenue ? f : top), fleetDetailed[0])?.type.toUpperCase() || '—'],
-      ['Registered Driver Adoption Rate', `${(audienceDetailed.find((a) => a.concept.includes('Registered'))?.volumeShare ?? 0 * 100).toFixed(1)}%`],
+      ['Registered Driver Adoption Rate', `${((audienceDetailed.find((a) => a.concept.includes('Registered'))?.volumeShare ?? 0) * 100).toFixed(1)}%`],
       ['Total Gate Inflow Events', peakHoursDetailed.reduce((s, h) => s + h.entries, 0)],
       ['Total Gate Outflow Events', peakHoursDetailed.reduce((s, h) => s + h.exits, 0)],
       [],
@@ -657,6 +712,84 @@ async function exportCustomExcel(
     XLSX.utils.book_append_sheet(wb, ws, 'Sessions Audit Log');
   }
 
+  if (options.revenueTraffic || options.peakHours || options.dwellTime || options.segmentation) {
+    const makeBars = (values: number[]) => {
+      const max = Math.max(1, ...values);
+      return values.map((value) => '█'.repeat(Math.max(value > 0 ? 1 : 0, Math.round((value / max) * 24))));
+    };
+    const dashboardRows: (string | number)[][] = [
+      ['PLPARK ANALYTICS • VISUAL DASHBOARD'],
+      [`${formattedStart} — ${formattedEnd}  |  Generated ${nowFormatted}`],
+      [],
+    ];
+    const chartSections: { title: string; headers: string[]; rows: (string | number)[][]; valueIndex: number }[] = [];
+
+    if (options.revenueTraffic) {
+      chartSections.push({
+        title: 'REVENUE BY PERIOD',
+        headers: ['Period', 'Revenue (PHP)', 'Sessions', 'Revenue chart'],
+        rows: timeSeriesData.map((item) => [item.label, item.revenue, item.sessions, '']),
+        valueIndex: 1,
+      });
+    }
+    if (options.peakHours) {
+      chartSections.push({
+        title: 'GATE ACTIVITY BY HOUR',
+        headers: ['Hour (24h)', 'Entries', 'Exits', 'Traffic chart'],
+        rows: peakHoursDetailed.map((item) => [item.hourLabel, item.entries, item.exits, '']),
+        valueIndex: -1,
+      });
+    }
+    if (options.dwellTime) {
+      chartSections.push({
+        title: 'SESSIONS BY PARKING DURATION',
+        headers: ['Duration bracket', 'Sessions', 'Volume share', 'Duration chart'],
+        rows: dwellData.map((item) => [item.label, item.count, item.percentage, '']),
+        valueIndex: 1,
+      });
+    }
+    if (options.segmentation) {
+      chartSections.push({
+        title: 'VEHICLE FLEET MIX',
+        headers: ['Vehicle type', 'Sessions', 'Revenue (PHP)', 'Fleet chart'],
+        rows: fleetDetailed.map((item) => [item.type.toUpperCase(), item.sessions, item.revenue, '']),
+        valueIndex: 1,
+      });
+    }
+
+    chartSections.forEach((section) => {
+      dashboardRows.push([], [section.title], section.headers);
+      const values = section.rows.map((row) => section.valueIndex < 0
+        ? (Number(row[1]) || 0) + (Number(row[2]) || 0)
+        : Number(row[section.valueIndex]) || 0);
+      const bars = makeBars(values);
+      section.rows.forEach((row, index) => {
+        row[3] = bars[index];
+        dashboardRows.push(row);
+      });
+    });
+
+    const chartSheet = XLSX.utils.aoa_to_sheet(dashboardRows);
+    chartSheet['!cols'] = [{ wch: 30 }, { wch: 20 }, { wch: 20 }, { wch: 30 }];
+    applyWorkbookDesign(chartSheet);
+    XLSX.utils.book_append_sheet(wb, chartSheet, 'Visual Dashboard');
+
+    for (const sheetName of wb.SheetNames) {
+      if (sheetName !== 'Visual Dashboard') applyWorkbookDesign(wb.Sheets[sheetName]);
+    }
+    for (let row = 0; row <= dashboardRows.length; row++) {
+      const cell = chartSheet[XLSX.utils.encode_cell({ r: row, c: 3 })];
+      if (cell?.v) {
+        cell.s = {
+          fill: { fgColor: { rgb: 'DBEAFE' } },
+          font: { name: 'Aptos', sz: 10, bold: true, color: { rgb: '2563EB' } },
+        };
+      }
+    }
+  } else {
+    for (const sheetName of wb.SheetNames) applyWorkbookDesign(wb.Sheets[sheetName]);
+  }
+
   const filename = `PLPark_Analytics_${toLocalISODate(new Date(filters.startDate))}_to_${toLocalISODate(new Date(filters.endDate))}.xlsx`;
   XLSX.writeFile(wb, filename);
 }
@@ -726,6 +859,8 @@ export function Statistics() {
 
   // -------- Export Modal State --------
   const [exportModalOpen, setExportModalOpen] = useState(false);
+  const [exporting, setExporting] = useState(false);
+  const [exportError, setExportError] = useState('');
   const [exportOptions, setExportOptions] = useState<ExportOptions>({
     executiveSummary: true,
     revenueTraffic: true,
@@ -749,6 +884,9 @@ export function Statistics() {
       }
       return next;
     });
+    setRtSelectedIntervalIdx(null);
+    setSelectedPeakHour(null);
+    setSelectedDurationBucket(null);
   }, []);
 
   const resetFilters = useCallback(() => {
@@ -1317,20 +1455,29 @@ export function Statistics() {
   // EXPORT HANDLER
   // ============================================================
 
-  const handleExecuteExport = useCallback(() => {
-    void exportCustomExcel(
-      filters,
-      kpis,
-      rtTimeSeriesData,
-      peakHoursDetailed,
-      durationBuckets.buckets,
-      audienceDetailed,
-      fleetDetailed,
-      filteredSessions,
-      filteredPayments,
-      exportOptions,
-    );
-    setExportModalOpen(false);
+  const handleExecuteExport = useCallback(async () => {
+    setExporting(true);
+    setExportError('');
+    try {
+      await exportCustomExcel(
+        filters,
+        kpis,
+        rtTimeSeriesData,
+        peakHoursDetailed,
+        durationBuckets.buckets,
+        audienceDetailed,
+        fleetDetailed,
+        filteredSessions,
+        filteredPayments,
+        exportOptions,
+      );
+      setExportModalOpen(false);
+    } catch (error) {
+      console.error('Failed to generate the Statistics workbook.', error);
+      setExportError(error instanceof Error ? error.message : 'The Excel workbook could not be generated.');
+    } finally {
+      setExporting(false);
+    }
   }, [filters, kpis, rtTimeSeriesData, peakHoursDetailed, durationBuckets.buckets, audienceDetailed, fleetDetailed, filteredSessions, filteredPayments, exportOptions]);
 
   // ============================================================
@@ -1531,7 +1678,7 @@ export function Statistics() {
                 {rtTimeSeriesData.map((row, idx) => (
                   <tr
                     key={row.label}
-                    className={rtSelectedIntervalIdx === idx ? 'highlighted' : ''}
+                    className={`interactive ${rtSelectedIntervalIdx === idx ? 'highlighted' : ''}`}
                     onClick={() => setRtSelectedIntervalIdx(idx)}
                   >
                     <td className="stat-font-medium">{row.label}</td>
@@ -1736,7 +1883,7 @@ export function Statistics() {
                 {peakHoursDetailed.map((row, idx) => (
                   <tr
                     key={row.hourLabel}
-                    className={selectedPeakHour === idx ? 'highlighted' : ''}
+                    className={`interactive ${selectedPeakHour === idx ? 'highlighted' : ''}`}
                     onClick={() => setSelectedPeakHour(idx)}
                   >
                     <td className="stat-font-medium">{row.hourLabel}</td>
@@ -2060,7 +2207,10 @@ export function Statistics() {
           </button>
           <button
             className="stat-action-btn stat-action-export"
-            onClick={() => setExportModalOpen(true)}
+            onClick={() => {
+              setExportError('');
+              setExportModalOpen(true);
+            }}
             disabled={loading}
             title="Export customized report to Excel"
           >
@@ -2371,7 +2521,7 @@ export function Statistics() {
                 <FileSpreadsheet size={22} className="stat-modal-icon" />
                 <div>
                   <h2>Export Analytics Workbook (.xlsx)</h2>
-                  <p>Select which data sheets to include. The exported file features clean headings, formatted tables, and auto-adjusted widths.</p>
+                  <p>Select data sheets for a styled workbook with a visual chart dashboard, formatted tables, and auto-sized columns.</p>
                 </div>
               </div>
               <button
@@ -2517,21 +2667,23 @@ export function Statistics() {
             </div>
 
             <div className="stat-modal-foot">
+              {exportError && <p className="stat-export-error" role="alert">{exportError}</p>}
               <button
                 type="button"
                 className="stat-btn-secondary"
                 onClick={() => setExportModalOpen(false)}
+                disabled={exporting}
               >
                 Cancel
               </button>
               <button
                 type="button"
                 className="stat-btn-primary"
-                onClick={handleExecuteExport}
-                disabled={!Object.values(exportOptions).some(Boolean)}
+                onClick={() => void handleExecuteExport()}
+                disabled={exporting || !Object.values(exportOptions).some(Boolean)}
               >
-                <Download size={15} />
-                Generate & Download .xlsx
+                {exporting ? <RefreshCw size={15} className="stat-spin" /> : <Download size={15} />}
+                {exporting ? 'Generating workbook…' : 'Generate & Download .xlsx'}
               </button>
             </div>
           </div>

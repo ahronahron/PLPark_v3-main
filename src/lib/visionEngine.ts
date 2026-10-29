@@ -2197,11 +2197,12 @@ export class EntranceProcessor {
         this._lastResult = result;
         this.resultCallbacks.forEach(cb => cb(result));
 
-        // Save entrance record: Upload exactly 1 image to Storage & create session
+        // Keep a scan event even when an active session prevents another entry.
+        const recognitionId = await this.recordPlateRecognition(result);
         if (await this.hasActiveSession(plateNumber)) {
           console.info(`[EntranceProcessor] Ignoring repeat entry scan for active vehicle ${plateNumber}`);
         } else {
-          await this.saveEntranceRecord(currentFrame.canvas, currentCrop || currentFrame.canvas, result);
+          await this.saveEntranceRecord(currentFrame.canvas, currentCrop || currentFrame.canvas, result, recognitionId);
         }
 
         // Show for RESULT_DISPLAY_MS (2500ms)
@@ -2324,7 +2325,8 @@ export class EntranceProcessor {
   private async saveEntranceRecord(
     fullCanvas: HTMLCanvasElement,
     _winningCrop: HTMLCanvasElement,
-    result: EntranceResult
+    result: EntranceResult,
+    recognitionId: string | null
   ): Promise<string | null> {
     try {
       // Phase 3 requirement: Upload exactly one image to Storage per accepted plate
@@ -2332,6 +2334,15 @@ export class EntranceProcessor {
 
       result.snapshotUrl = snapshotUrl || '';
       result.plateSnapshotUrl = snapshotUrl || '';
+
+      if (recognitionId && snapshotUrl) {
+        const { error } = await supabase.from('plate_recognitions')
+          .update({ image_url: snapshotUrl })
+          .eq('id', recognitionId);
+        if (error) {
+          console.error('[EntranceProcessor] Could not attach snapshot to recognition:', error);
+        }
+      }
 
       const sessionId = await this.createSession(result);
       return sessionId;
@@ -2424,6 +2435,23 @@ export class EntranceProcessor {
     return Boolean(data?.some(session => session.plate_number.toUpperCase().replace(/[\s-]+/g, '') === normalizedPlate));
   }
 
+  private async recordPlateRecognition(result: EntranceResult): Promise<string | null> {
+    const { data, error } = await supabase.from('plate_recognitions').insert({
+      plate_number: result.plateNumber,
+      vehicle_type: result.vehicleType,
+      direction: 'entry',
+      confidence: result.confidence,
+      camera_name: 'Webcam Entrance',
+    }).select('id').maybeSingle();
+
+    if (error) {
+      console.error('[EntranceProcessor] Could not log plate recognition:', error);
+      return null;
+    }
+
+    return data?.id || null;
+  }
+
   private async createSession(result: EntranceResult): Promise<string | null> {
     try {
       if (await this.hasActiveSession(result.plateNumber)) {
@@ -2432,15 +2460,6 @@ export class EntranceProcessor {
       }
 
       const visitorModeEnabled = await this.getVisitorEntryMode();
-
-      await supabase.from('plate_recognitions').insert({
-        plate_number: result.plateNumber,
-        vehicle_type: result.vehicleType,
-        direction: 'entry',
-        confidence: result.confidence,
-        camera_name: 'Webcam Entrance',
-        image_url: result.plateSnapshotUrl || result.snapshotUrl,
-      });
 
       if (!result.isPrivate && !visitorModeEnabled) {
         await this.createGuestReviewAlert(result);
@@ -3702,4 +3721,3 @@ export class SlotMonitorProcessor {
     }
   }
 }
-

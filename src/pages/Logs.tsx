@@ -6,7 +6,7 @@
  * 2. **Payment Logs** — Financial audit logs with detailed receipt quick look.
  * 3. **User Management** — Staff/admin account management.
  */
-import { useEffect, useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import {
   supabase,
   type User,
@@ -14,6 +14,7 @@ import {
   type Vehicle,
   type Payment,
   type ParkingSession,
+  type PlateRecognition,
   type PaymentMethod,
   logActivity
 } from '@/lib/supabase';
@@ -39,6 +40,7 @@ export function Logs({ readOnly = false }: { readOnly?: boolean }) {
   /** State datasets */
   const [sessions, setSessions] = useState<ParkingSession[]>([]);
   const [payments, setPayments] = useState<Payment[]>([]);
+  const [recognitions, setRecognitions] = useState<PlateRecognition[]>([]);
   const [users, setUsers] = useState<User[]>([]);
   const [appUsers, setAppUsers] = useState<AppUser[]>([]);
 
@@ -73,9 +75,22 @@ export function Logs({ readOnly = false }: { readOnly?: boolean }) {
   const [addUserError, setAddUserError] = useState('');
 
   /** Load data based on active tab */
-  const loadData = () => {
+  const loadRecognitions = useCallback(async () => {
+    const { data, error } = await supabase.from('plate_recognitions')
+      .select('*')
+      .order('created_at', { ascending: false })
+      .limit(100);
+    if (error) {
+      console.error('[Logs] Could not load plate recognitions:', error);
+      return;
+    }
+    setRecognitions(data || []);
+  }, []);
+
+  const loadData = useCallback(() => {
     supabase.from('parking_sessions').select('*').order('created_at', { ascending: false }).then(({ data }) => setSessions(data || []));
     supabase.from('payments').select('*').order('created_at', { ascending: false }).then(({ data }) => setPayments(data || []));
+    void loadRecognitions();
     if (!readOnly) supabase.from('users').select('*').order('created_at', { ascending: false }).then(({ data }) => setUsers(data || []));
     supabase.from('app_users').select('*').order('created_at', { ascending: false }).then(({ data }) => setAppUsers(data || []));
     if (!readOnly) {
@@ -88,13 +103,29 @@ export function Logs({ readOnly = false }: { readOnly?: boolean }) {
         setHourlyRateMotos(Number(settings.hourly_rate_motorcycle) || 25);
       });
     }
-  };
+  }, [loadRecognitions, readOnly]);
 
   useEffect(() => {
     loadData();
     setSearchQuery('');
     setStatusFilter('all');
-  }, [activeTab, readOnly]);
+  }, [activeTab, loadData]);
+
+  useEffect(() => {
+    const channel = supabase
+      .channel('logs-vehicle-realtime')
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'parking_sessions' }, () => {
+        loadData();
+      })
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'plate_recognitions' }, () => {
+        void loadRecognitions();
+      })
+      .subscribe();
+
+    return () => {
+      void supabase.removeChannel(channel);
+    };
+  }, [loadData, loadRecognitions]);
 
   /** Deletions */
   const deleteSession = async (id: string) => {
@@ -375,6 +406,23 @@ export function Logs({ readOnly = false }: { readOnly?: boolean }) {
   // ============================================================
 
   /** 1. Vehicle Logs view (First Tab) */
+  const getSessionImageUrl = (session: ParkingSession) => {
+    if (session.image_url) return session.image_url;
+
+    const sessionEntryTime = new Date(session.entry_time).getTime();
+    const normalizedPlate = session.plate_number.toUpperCase().replace(/[\s-]+/g, '');
+    return recognitions.find(recognition =>
+      recognition.image_url &&
+      recognition.direction === 'entry' &&
+      recognition.plate_number.toUpperCase().replace(/[\s-]+/g, '') === normalizedPlate &&
+      new Date(recognition.created_at).getTime() <= sessionEntryTime
+    )?.image_url || null;
+  };
+
+  const openSessionDetails = (session: ParkingSession) => {
+    setViewSession({ ...session, image_url: getSessionImageUrl(session) });
+  };
+
   const renderVehicles = () => (
     <div className="logs-content-section">
       <div className="page-toolbar">
@@ -418,8 +466,9 @@ export function Logs({ readOnly = false }: { readOnly?: boolean }) {
           {filteredSessions.map(s => {
             const hasPaid = payments.some(p => p.session_id === s.id && p.status === 'completed') || s.concept === 'B';
             const owner = appUsers.find(appUser => appUser.id === s.app_user_id);
+            const imageUrl = getSessionImageUrl(s);
             return (
-              <tr key={s.id} className="logs-interactive-row" onClick={() => setViewSession(s)}>
+              <tr key={s.id} className="logs-interactive-row" onClick={() => openSessionDetails(s)}>
                 <td className="mono font-bold">{s.plate_number}</td>
                 <td>{owner ? <span className="log-owner-cell"><strong>{owner.full_name}</strong><small>{owner.email}</small></span> : 'Guest'}</td>
                 <td>
@@ -432,14 +481,14 @@ export function Logs({ readOnly = false }: { readOnly?: boolean }) {
                 <td>{new Date(s.entry_time).toLocaleString()}</td>
                 <td>{s.exit_time ? new Date(s.exit_time).toLocaleString() : '—'}</td>
                 <td>
-                  {s.image_url ? (
+                  {imageUrl ? (
                     <div className="flex items-center gap-2" onClick={e => e.stopPropagation()}>
                       <img
-                        src={s.image_url}
+                        src={imageUrl}
                         alt="Entrance Snapshot"
                         style={{ width: '48px', height: '28px', borderRadius: '4px', objectFit: 'cover', border: '1px solid var(--cursor-border)' }}
                       />
-                      <button className="action-btn" onClick={() => window.open(s.image_url || undefined)} title="View full image">
+                      <button className="action-btn" onClick={() => window.open(imageUrl, '_blank', 'noopener,noreferrer')} title="View full image">
                         <IconView size={14} />
                       </button>
                     </div>
@@ -455,7 +504,7 @@ export function Logs({ readOnly = false }: { readOnly?: boolean }) {
                     <button
                       className="action-btn"
                       title="Quick look details"
-                      onClick={() => setViewSession(s)}
+                      onClick={() => openSessionDetails(s)}
                     >
                       <IconView size={14} />
                     </button>
