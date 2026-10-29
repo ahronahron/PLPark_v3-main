@@ -368,19 +368,11 @@ export function Settings() {
               <div className="settings-form gateway-form" style={{ maxWidth: '540px', margin: '0 auto' }}>
                 <div className="toggle-row">
                   <div style={{ display: 'flex', flexDirection: 'column', gap: '4px' }}>
-                    <span className="toggle-label">Visitor Entry Mode</span>
+                    <span className="toggle-label">Automatic Vehicle Sessions</span>
                     <small style={{ color: '#8aa0b8' }}>
-                      {Boolean(settings.visitor_entry_mode) ? 'On — unregistered plates are allowed as guests.' : 'Off — unregistered plates must register before entry.'}
+                      Every complete plate scan creates an active session. Registered vehicles are linked to their account; other vehicles are recorded as guests.
                     </small>
                   </div>
-                  <label className="toggle-switch">
-                    <input
-                      type="checkbox"
-                      checked={Boolean(settings.visitor_entry_mode)}
-                      onChange={e => saveSetting('visitor_entry_mode', e.target.checked)}
-                    />
-                    <span className="toggle-slider" />
-                  </label>
                 </div>
                 <div style={{ marginTop: '14px', borderTop: '1px solid rgba(148,163,184,0.2)', paddingTop: '12px' }}>
                   <h3 style={{ fontSize: '13px', fontWeight: 600, marginBottom: '12px' }}>Payment Gateways</h3>

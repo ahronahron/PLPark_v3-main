@@ -2251,45 +2251,6 @@ export class EntranceProcessor {
     }
   }
 
-  private async getVisitorEntryMode(): Promise<boolean> {
-    try {
-      const { data } = await supabase
-        .from('settings')
-        .select('value')
-        .eq('key', 'visitor_entry_mode')
-        .maybeSingle();
-
-      const value = data?.value;
-      if (typeof value === 'boolean') return value;
-      if (typeof value === 'string') return value.toLowerCase() === 'true';
-      return false;
-    } catch (err) {
-      console.warn('[EntranceProcessor] Could not read visitor entry mode:', err);
-      return false;
-    }
-  }
-
-  private async createGuestReviewAlert(result: EntranceResult): Promise<void> {
-    try {
-      const imageUrl = result.plateSnapshotUrl || result.snapshotUrl || null;
-      await supabase.from('notifications').insert({
-        type: 'warning',
-        title: `Guest Vehicle Requires Approval: ${result.plateNumber}`,
-        message: `Vehicle ${result.plateNumber} is not registered in the system and Automatic Entry mode is currently off. The driver must register first or request approval from an admin before entering. Vehicle type: ${result.vehicleType}; Color: ${result.color}; Confidence: ${result.confidence}%.`,
-        image_url: imageUrl,
-      });
-      await logActivity('Blocked guest entry', 'Vehicle Access', {
-        plate_number: result.plateNumber,
-        vehicle_type: result.vehicleType,
-        color: result.color,
-        confidence: result.confidence,
-        visitor_entry_mode: false,
-      });
-    } catch (err) {
-      console.error('[EntranceProcessor] Guest review alert failed:', err);
-    }
-  }
-
   private async createManualReviewAlert(result: EntranceResult): Promise<void> {
     try {
       const imageUrl = result.plateSnapshotUrl || result.capturedImage || null;
@@ -2456,14 +2417,6 @@ export class EntranceProcessor {
     try {
       if (await this.hasActiveSession(result.plateNumber)) {
         console.info(`[EntranceProcessor] Skipping duplicate active session for ${result.plateNumber}`);
-        return null;
-      }
-
-      const visitorModeEnabled = await this.getVisitorEntryMode();
-
-      if (!result.isPrivate && !visitorModeEnabled) {
-        await this.createGuestReviewAlert(result);
-        console.log(`[EntranceProcessor] Guest entry blocked for ${result.plateNumber} because visitor mode is off.`);
         return null;
       }
 

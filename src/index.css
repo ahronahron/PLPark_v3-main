@@ -1006,6 +1006,7 @@ a { color: inherit; text-decoration: none; }
 .status-badge.pending { background: rgba(217,119,6,0.12); color: var(--cursor-yellow); }
 .status-badge.failed { background: rgba(220,38,38,0.12); color: var(--cursor-red); }
 .status-badge.active { background: rgba(22,163,74,0.12); color: var(--cursor-green); }
+.status-badge.scan-recorded { background: rgba(37,99,235,0.12); color: var(--cursor-blue); }
 .status-badge.inactive { background: rgba(100,116,139,0.12); color: var(--cursor-text-secondary); }
 .role-badge { padding: 2px 8px; border-radius: 4px; font-size: 11px; font-weight: 600; text-transform: uppercase; }
 .role-badge.admin { background: rgba(147,51,234,0.12); color: var(--cursor-purple); }

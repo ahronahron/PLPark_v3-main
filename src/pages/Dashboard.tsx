@@ -65,14 +65,6 @@ export function Dashboard() {
   const [gracePeriodMinutes, setGracePeriodMinutes] = useState(0);
   const [allowManualExit, setAllowManualExit] = useState(false);
   const [enabledPaymentMethods, setEnabledPaymentMethods] = useState<PaymentMethod[]>(['cash', 'gcash', 'card']);
-  const [visitorEntryMode, setVisitorEntryMode] = useState(false);
-  const [guestReviewRequest, setGuestReviewRequest] = useState<{
-    plateNumber: string;
-    vehicleType: VehicleType;
-    color: string;
-    imageUrl: string;
-    confidence: number;
-  } | null>(null);
 
   /** Captured Plate card state — keeps showing last capture until next vehicle event */
   const [capturedPlate, setCapturedPlate] = useState<{
@@ -158,7 +150,6 @@ export function Dashboard() {
         setGracePeriodMinutes(Math.max(0, Number(m.grace_period_minutes) || 0));
         setAllowManualExit(Boolean(m.allow_manual_exit));
         setEnabledPaymentMethods(Array.isArray(m.payment_methods) ? m.payment_methods as PaymentMethod[] : ['cash', 'gcash', 'card']);
-        setVisitorEntryMode(Boolean(m.visitor_entry_mode));
       }
     });
 
@@ -197,7 +188,7 @@ export function Dashboard() {
 
   /** Vision callbacks */
   const handleEntranceResult = useCallback((result: EntranceResult) => {
-    console.log('[Dashboard] Entrance detection:', result.plateNumber, 'guest=', !result.isPrivate, 'mode=', visitorEntryMode);
+    console.log('[Dashboard] Entrance detection:', result.plateNumber, 'guest=', !result.isPrivate);
 
     // Show chosen snapshot frame in "Captured plate" card until the next capture occurs
     const chosenImage = result.capturedImage || result.plateSnapshotUrl || result.snapshotUrl;
@@ -217,18 +208,8 @@ export function Dashboard() {
       });
     }
 
-    if (!result.isPrivate && !visitorEntryMode) {
-      setGuestReviewRequest({
-        plateNumber: result.plateNumber,
-        vehicleType: result.vehicleType,
-        color: result.color || 'Unknown',
-        imageUrl: result.plateSnapshotUrl || result.snapshotUrl || '',
-        confidence: result.confidence,
-      });
-    }
-
     refreshData();
-  }, [refreshData, visitorEntryMode]);
+  }, [refreshData]);
 
   const handleExitResult = useCallback((result: ExitResult) => {
     console.log('[Dashboard] Exit detection:', result.plateNumber, result.totalAmount);
@@ -335,48 +316,6 @@ export function Dashboard() {
   // ============================================================
   // ACTION HANDLERS
   // ============================================================
-
-  const handleGuestApprovalDecision = async (allowEntry: boolean) => {
-    if (!guestReviewRequest) return;
-
-    if (allowEntry) {
-      const guestTime = new Date().toISOString();
-      const { error } = await supabase.from('parking_sessions').insert({
-        plate_number: guestReviewRequest.plateNumber,
-        vehicle_type: guestReviewRequest.vehicleType,
-        color: guestReviewRequest.color,
-        image_url: guestReviewRequest.imageUrl,
-        concept: 'A',
-        entry_camera: 'Admin Approval',
-        status: 'active',
-        entry_time: guestTime,
-      });
-
-      if (error) {
-        setExitStatus({ msg: 'Guest approval failed: ' + error.message, ok: false });
-        return;
-      }
-
-      await supabase.from('notifications').insert({
-        type: 'success',
-        title: `Guest Entry Approved: ${guestReviewRequest.plateNumber}`,
-        message: `Admin approved entry for ${guestReviewRequest.plateNumber}. Vehicle type: ${guestReviewRequest.vehicleType}; Color: ${guestReviewRequest.color}.`,
-        image_url: guestReviewRequest.imageUrl || null,
-      });
-      await logActivity('Approved guest entry', 'Vehicle Access', { plate_number: guestReviewRequest.plateNumber, approved: true });
-    } else {
-      await supabase.from('notifications').insert({
-        type: 'warning',
-        title: `Guest Entry Denied: ${guestReviewRequest.plateNumber}`,
-        message: `Admin denied entry for ${guestReviewRequest.plateNumber}. The vehicle must register before entry.`,
-        image_url: guestReviewRequest.imageUrl || null,
-      });
-      await logActivity('Denied guest entry', 'Vehicle Access', { plate_number: guestReviewRequest.plateNumber, approved: false });
-    }
-
-    setGuestReviewRequest(null);
-    refreshData();
-  };
 
   /** Handle Manual Entry Submit */
   const handleManualEntrySubmit = async () => {
@@ -881,53 +820,6 @@ export function Dashboard() {
           </div>
         </div>
       </div>
-
-      {/* ===== 1. RECOGNITION DETAILS QUICK LOOK MODAL ===== */}
-      {guestReviewRequest && (
-        <div className="modal-overlay" onClick={() => setGuestReviewRequest(null)}>
-          <div className="modal-container quick-look-modal" onClick={e => e.stopPropagation()}>
-            <div className="modal-header">
-              <div className="quick-look-title-bar">
-                <span className="rec-badge warning" style={{ fontSize: '11px', padding: '3px 8px' }}>GUEST REVIEW</span>
-                <h3>Unregistered Vehicle Detected</h3>
-              </div>
-              <button className="close-btn" onClick={() => setGuestReviewRequest(null)}>×</button>
-            </div>
-            <div className="modal-body">
-              <div className="quick-look-banner">
-                {guestReviewRequest.imageUrl ? (
-                  <img src={guestReviewRequest.imageUrl} alt="Guest plate snapshot" className="quick-look-image" />
-                ) : (
-                  <div className="quick-look-icon-placeholder"><IconCar size={36} /></div>
-                )}
-                <div className="quick-look-plate-info">
-                  <div className="quick-look-plate">{formatPlateForDisplay(guestReviewRequest.plateNumber)}</div>
-                  <div className="quick-look-type-row">
-                    <span className="quick-look-type">{guestReviewRequest.vehicleType}</span>
-                    <span className="quick-look-conf">Confidence: {guestReviewRequest.confidence}%</span>
-                  </div>
-                  <div className="quick-look-cam">Vehicle color: <strong>{guestReviewRequest.color}</strong></div>
-                </div>
-              </div>
-              <div className="quick-look-grid">
-                <div className="quick-look-cell">
-                  <span className="cell-label">Access Status</span>
-                  <span className="cell-val" style={{ color: '#f59e0b' }}>Guest — requires registration or admin approval</span>
-                </div>
-                <div className="quick-look-cell">
-                  <span className="cell-label">Entry Rule</span>
-                  <span className="cell-val">Automatic Entry is disabled. Entry blocked until approved.</span>
-                </div>
-              </div>
-              <div className="clean-modal-actions" style={{ marginTop: '16px' }}>
-                <button className="btn-secondary" onClick={() => setGuestReviewRequest(null)}>Close</button>
-                <button className="btn-danger-action" onClick={() => handleGuestApprovalDecision(false)}>Deny Entry</button>
-                <button className="btn-primary" onClick={() => handleGuestApprovalDecision(true)}>Allow Entry</button>
-              </div>
-            </div>
-          </div>
-        </div>
-      )}
 
       {selectedRecognition && (
         <div className="modal-overlay" onClick={() => setSelectedRecognition(null)}>

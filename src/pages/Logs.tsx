@@ -423,6 +423,39 @@ export function Logs({ readOnly = false }: { readOnly?: boolean }) {
     setViewSession({ ...session, image_url: getSessionImageUrl(session) });
   };
 
+  const unmatchedEntryScans = statusFilter === 'all'
+    ? recognitions.filter(recognition => {
+      if (recognition.direction !== 'entry') return false;
+
+      const normalizedPlate = recognition.plate_number.toUpperCase().replace(/[\s-]+/g, '');
+      const recognitionTime = new Date(recognition.created_at).getTime();
+      const hasMatchingSession = sessions.some(session => {
+        const samePlate = session.plate_number.toUpperCase().replace(/[\s-]+/g, '') === normalizedPlate;
+        const entryTime = new Date(session.entry_time).getTime();
+        return samePlate && Math.abs(entryTime - recognitionTime) <= 5 * 60 * 1000;
+      });
+      if (hasMatchingSession) return false;
+
+      if (!searchQuery.trim()) return true;
+      const query = searchQuery.toLowerCase().trim();
+      return recognition.plate_number.toLowerCase().includes(query) ||
+        (recognition.vehicle_type?.toLowerCase().includes(query) ?? false);
+    })
+    : [];
+
+  const vehicleLogRows = [
+    ...filteredSessions.map(session => ({
+      kind: 'session' as const,
+      timestamp: new Date(session.entry_time).getTime(),
+      session,
+    })),
+    ...unmatchedEntryScans.map(recognition => ({
+      kind: 'scan' as const,
+      timestamp: new Date(recognition.created_at).getTime(),
+      recognition,
+    })),
+  ].sort((a, b) => b.timestamp - a.timestamp);
+
   const renderVehicles = () => (
     <div className="logs-content-section">
       <div className="page-toolbar">
@@ -463,7 +496,49 @@ export function Logs({ readOnly = false }: { readOnly?: boolean }) {
           </tr>
         </thead>
         <tbody>
-          {filteredSessions.map(s => {
+          {vehicleLogRows.map(row => {
+            if (row.kind === 'scan') {
+              const { recognition } = row;
+              return (
+                <tr key={`scan-${recognition.id}`}>
+                  <td className="mono font-bold">{recognition.plate_number}</td>
+                  <td>Guest</td>
+                  <td>
+                    <span className="flex items-center gap-2">
+                      {recognition.vehicle_type === 'motorcycle' ? <IconMotorcycle size={15} /> : <IconCar size={15} />}
+                      <span className="capitalize">{recognition.vehicle_type || '—'}</span>
+                    </span>
+                  </td>
+                  <td className="mono">—</td>
+                  <td>{new Date(recognition.created_at).toLocaleString()}</td>
+                  <td>—</td>
+                  <td>
+                    {recognition.image_url ? (
+                      <div className="flex items-center gap-2">
+                        <img
+                          src={recognition.image_url}
+                          alt={`Entrance snapshot for ${recognition.plate_number}`}
+                          style={{ width: '48px', height: '28px', borderRadius: '4px', objectFit: 'cover', border: '1px solid var(--cursor-border)' }}
+                        />
+                        <button
+                          className="action-btn"
+                          onClick={() => window.open(recognition.image_url || undefined, '_blank', 'noopener,noreferrer')}
+                          title="View full image"
+                        >
+                          <IconView size={14} />
+                        </button>
+                      </div>
+                    ) : (
+                      <span className="text-muted text-xs italic">No Image</span>
+                    )}
+                  </td>
+                  <td><span className="status-badge scan-recorded">Scanned</span></td>
+                  <td><span className="text-muted text-xs">No session</span></td>
+                </tr>
+              );
+            }
+
+            const s = row.session;
             const hasPaid = payments.some(p => p.session_id === s.id && p.status === 'completed') || s.concept === 'B';
             const owner = appUsers.find(appUser => appUser.id === s.app_user_id);
             const imageUrl = getSessionImageUrl(s);
@@ -537,7 +612,7 @@ export function Logs({ readOnly = false }: { readOnly?: boolean }) {
               </tr>
             );
           })}
-          {filteredSessions.length === 0 && <tr><td colSpan={9} className="empty-state">No vehicle sessions found</td></tr>}
+          {vehicleLogRows.length === 0 && <tr><td colSpan={9} className="empty-state">No vehicle logs found</td></tr>}
         </tbody>
       </table>
     </div>
