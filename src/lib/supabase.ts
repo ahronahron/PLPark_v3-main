@@ -200,7 +200,7 @@ export interface Camera {
   is_online: boolean;
   slot_range: string | null;
   device_id: string | null;
-  connection_method?: 'device' | 'ip' | string | null;
+  connection_method?: 'device' | 'ip' | 'usb' | string | null;
   ip_address?: string | null;
   created_at: string;
 }

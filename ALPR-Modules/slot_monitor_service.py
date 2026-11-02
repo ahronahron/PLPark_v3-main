@@ -6,6 +6,10 @@ temporal smoothing, and MJPEG streaming for debugging.
 import base64
 import json
 import os
+
+# Speed up Media Foundation startup by disabling hardware transforms
+os.environ.setdefault('OPENCV_VIDEOIO_MSMF_ENABLE_HW_TRANSFORMS', '0')
+
 import sys
 import threading
 import time
@@ -75,8 +79,18 @@ except Exception as e:
     print(f"[SlotMonitor] Warning moving model to {DEVICE}: {e}")
 
 config_lock = threading.Lock()
-camera_config = {"url": "", "mode": ""}
+camera_config = {"url": "", "mode": "", "index": 0}
 slots_config = []
+
+# USB camera status & configuration cache
+usb_status_lock = threading.Lock()
+active_usb_backend: str | None = None
+active_usb_brightness: float | None = None
+active_usb_width: int = 1280
+active_usb_height: int = 720
+usb_camera_connected: bool = False
+usb_camera_message: str | None = None
+working_usb_configs: dict[int, dict[str, Any]] = {}
 
 frame_lock = threading.Lock()
 latest_frame = None
@@ -248,63 +262,282 @@ def format_url(url: str) -> str:
         return f"http://{url}"
     return url
 
+def open_usb_capture(index: int):
+    """Open and validate a USB camera capture for the given index.
+
+    Tries configurations in order:
+    Backends come from env USB_BACKEND (auto, dshow, msmf; default auto = DirectShow,
+    then Media Foundation, then the default backend), each with MJPG 1280x720 and then
+    with the camera's default settings.
+    For each: open, discard 15 warm-up frames, read 5 more, and accept only if the
+    mean brightness >= 8 and the standard deviation >= 3.
+    Otherwise release and try the next.
+    Remembers the working setting per index and tries it first on reconnect.
+    """
+    env_backend = os.environ.get('USB_BACKEND', 'auto').strip().lower()
+    if env_backend == 'dshow':
+        backend_candidates = [('DSHOW', cv2.CAP_DSHOW)]
+    elif env_backend == 'msmf':
+        backend_candidates = [('MSMF', cv2.CAP_MSMF)]
+    else:  # 'auto' or default
+        backend_candidates = [
+            ('DSHOW', cv2.CAP_DSHOW),
+            ('MSMF', cv2.CAP_MSMF),
+            ('DEFAULT', cv2.CAP_ANY)
+        ]
+
+    # Build all standard configurations: each backend with MJPG 1280x720 then default
+    standard_configs = []
+    for b_name, b_val in backend_candidates:
+        standard_configs.append({'backend_name': b_name, 'backend_val': b_val, 'mjpg': True})
+        standard_configs.append({'backend_name': b_name, 'backend_val': b_val, 'mjpg': False})
+
+    # Try remembered working setting first if present
+    configs_to_try = []
+    with usb_status_lock:
+        remembered = working_usb_configs.get(index)
+
+    if remembered:
+        configs_to_try.append(remembered)
+        for cfg in standard_configs:
+            if (cfg['backend_name'] != remembered.get('backend_name') or
+                cfg['mjpg'] != remembered.get('mjpg')):
+                configs_to_try.append(cfg)
+    else:
+        configs_to_try = standard_configs
+
+    for cfg in configs_to_try:
+        b_name = cfg['backend_name']
+        b_val = cfg['backend_val']
+        use_mjpg = cfg['mjpg']
+        cap = None
+        try:
+            if b_val is not None and b_val != cv2.CAP_ANY:
+                cap = cv2.VideoCapture(index, b_val)
+            else:
+                cap = cv2.VideoCapture(index)
+
+            if not cap or not cap.isOpened():
+                if cap:
+                    cap.release()
+                continue
+
+            if use_mjpg:
+                cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*'MJPG'))
+                cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1280)
+                cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 720)
+            cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+
+            # Discard 15 warm-up frames
+            warmup_ok = True
+            for _ in range(15):
+                ret, _ = cap.read()
+                if not ret:
+                    warmup_ok = False
+                    break
+
+            if not warmup_ok:
+                cap.release()
+                continue
+
+            # Read 5 more frames
+            test_frames = []
+            for _ in range(5):
+                ret, frame = cap.read()
+                if ret and frame is not None and frame.size > 0:
+                    test_frames.append(frame)
+
+            if len(test_frames) == 0:
+                cap.release()
+                continue
+
+            mean_brightness = float(np.mean([np.mean(f) for f in test_frames]))
+            std_dev = float(np.mean([np.std(f) for f in test_frames]))
+
+            if mean_brightness >= 8.0 and std_dev >= 3.0:
+                w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH)) or 1280
+                h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT)) or 720
+                mjpg_str = 'true' if use_mjpg else 'false'
+                print(f"[USB] index={index} backend={b_name} mjpg={mjpg_str} {w}x{h} brightness={round(mean_brightness)}")
+                with usb_status_lock:
+                    working_usb_configs[index] = {
+                        'backend_name': b_name,
+                        'backend_val': b_val,
+                        'mjpg': use_mjpg
+                    }
+                return cap, {
+                    'backend': b_name,
+                    'backend_val': b_val,
+                    'mjpg': use_mjpg,
+                    'width': w,
+                    'height': h,
+                    'brightness': round(mean_brightness, 1)
+                }
+            else:
+                cap.release()
+        except Exception:
+            if cap:
+                cap.release()
+
+    return None, None
+
 def camera_thread():
     global latest_frame, last_frame_time
+    global active_usb_backend, active_usb_brightness, active_usb_width, active_usb_height
+    global usb_camera_connected, usb_camera_message
+
     cap = None
     active_base_url = None
-    
+    active_usb_index = None
+    active_mode = None
+    backoff = 1.0
+
     while running:
         with config_lock:
             mode = camera_config.get('mode')
             url = camera_config.get('url')
-            
-        if not url:
-            if cap:
-                cap.release()
-                cap = None
-            active_base_url = None
-            time.sleep(1)
-            continue
-            
-        base_url = format_url(url)
-        if base_url != active_base_url:
-            if cap:
-                cap.release()
-                cap = None
-            active_base_url = base_url
-        
-        try:
-            if mode == 'snapshot':
-                resp = requests.get(f"{base_url}/shot.jpg", verify=False, timeout=3)
-                if resp.status_code == 200:
-                    arr = np.frombuffer(resp.content, np.uint8)
-                    frame = cv2.imdecode(arr, cv2.IMREAD_COLOR)
-                    if frame is not None:
-                        with frame_lock:
-                            latest_frame = frame
-                            last_frame_time = time.time()
-                time.sleep(0.3) # ~3fps
-                
-            elif mode == 'mjpeg':
-                if cap is None or not cap.isOpened():
-                    cap = cv2.VideoCapture(f"{base_url}/video")
+            usb_index_raw = camera_config.get('index')
+            try:
+                usb_index = int(usb_index_raw) if usb_index_raw is not None else 0
+            except (ValueError, TypeError):
+                usb_index = 0
+
+        # Mode: USB Webcam
+        if mode == 'usb':
+            if active_mode != 'usb' or active_usb_index != usb_index:
+                if cap:
+                    cap.release()
+                    cap = None
+                active_mode = 'usb'
+                active_usb_index = usb_index
+                active_base_url = None
+                backoff = 1.0
+                with usb_status_lock:
+                    usb_camera_connected = False
+                    usb_camera_message = None
+
+            if cap is None or not cap.isOpened():
+                new_cap, info = open_usb_capture(usb_index)
+                if new_cap is not None:
+                    cap = new_cap
+                    with usb_status_lock:
+                        active_usb_backend = info['backend']
+                        active_usb_brightness = info['brightness']
+                        active_usb_width = info['width']
+                        active_usb_height = info['height']
+                        usb_camera_connected = True
+                        usb_camera_message = None
+                    backoff = 1.0
+                else:
+                    with usb_status_lock:
+                        active_usb_backend = None
+                        active_usb_brightness = None
+                        usb_camera_connected = False
+                        usb_camera_message = f"USB camera {usb_index} returns black frames"
+                    time.sleep(backoff)
+                    backoff = min(backoff * 1.5, 10.0)
+                    continue
+
+            try:
                 ret, frame = cap.read()
-                if ret and frame is not None:
+                if ret and frame is not None and frame.size > 0:
                     with frame_lock:
                         latest_frame = frame
                         last_frame_time = time.time()
+                    with usb_status_lock:
+                        active_usb_brightness = round(float(frame.mean()), 1)
+                    time.sleep(0.01)
                 else:
-                    if cap: cap.release()
+                    print(f"[USB] Frame grab failed for camera {usb_index}, reconnecting...")
+                    if cap:
+                        cap.release()
                     cap = None
-                    time.sleep(1)
-            else:
+                    with usb_status_lock:
+                        usb_camera_connected = False
+                        usb_camera_message = f"USB camera {usb_index} returns black frames"
+                    time.sleep(backoff)
+                    backoff = min(backoff * 1.5, 10.0)
+            except Exception as e:
+                print(f"[USB] Exception during read: {e}")
+                if cap:
+                    cap.release()
+                cap = None
+                with usb_status_lock:
+                    usb_camera_connected = False
+                    usb_camera_message = f"USB camera {usb_index} returns black frames"
+                time.sleep(backoff)
+                backoff = min(backoff * 1.5, 10.0)
+
+        # Mode: Snapshot / MJPEG (IP camera)
+        elif mode in ('snapshot', 'mjpeg'):
+            if active_mode == 'usb' and cap:
+                cap.release()
+                cap = None
+            active_mode = mode
+            active_usb_index = None
+            with usb_status_lock:
+                usb_camera_connected = False
+                usb_camera_message = None
+                active_usb_backend = None
+                active_usb_brightness = None
+
+            if not url:
+                if cap:
+                    cap.release()
+                    cap = None
+                active_base_url = None
                 time.sleep(1)
-        except Exception:
+                continue
+
+            base_url = format_url(url)
+            if base_url != active_base_url:
+                if cap:
+                    cap.release()
+                    cap = None
+                active_base_url = base_url
+
+            try:
+                if mode == 'snapshot':
+                    resp = requests.get(f"{base_url}/shot.jpg", verify=False, timeout=3)
+                    if resp.status_code == 200:
+                        arr = np.frombuffer(resp.content, np.uint8)
+                        frame = cv2.imdecode(arr, cv2.IMREAD_COLOR)
+                        if frame is not None:
+                            with frame_lock:
+                                latest_frame = frame
+                                last_frame_time = time.time()
+                    time.sleep(0.3)
+                elif mode == 'mjpeg':
+                    if cap is None or not cap.isOpened():
+                        cap = cv2.VideoCapture(f"{base_url}/video")
+                    ret, frame = cap.read()
+                    if ret and frame is not None:
+                        with frame_lock:
+                            latest_frame = frame
+                            last_frame_time = time.time()
+                    else:
+                        if cap: cap.release()
+                        cap = None
+                        time.sleep(1)
+            except Exception:
+                if cap:
+                    cap.release()
+                    cap = None
+                time.sleep(2)
+        else:
             if cap:
                 cap.release()
                 cap = None
-            time.sleep(2)
-            
+            active_mode = None
+            active_usb_index = None
+            active_base_url = None
+            with usb_status_lock:
+                usb_camera_connected = False
+                usb_camera_message = None
+                active_usb_backend = None
+                active_usb_brightness = None
+            time.sleep(1)
+
     if cap:
         cap.release()
 
@@ -675,46 +908,149 @@ class SlotMonitorHandler(BaseHTTPRequestHandler):
             with config_lock:
                 c_mode = camera_config.get('mode')
                 c_url = camera_config.get('url', '')
+                c_idx_raw = camera_config.get('index', 0)
+                try:
+                    c_idx = int(c_idx_raw) if c_idx_raw is not None else 0
+                except (ValueError, TypeError):
+                    c_idx = 0
             with frame_lock:
                 age = time.time() - last_frame_time if last_frame_time > 0 else 999.0
-            
-            is_connected = (age < 5.0) and bool(c_url) and (last_frame_time > 0)
+
             metrics = get_health_metrics()
-            payload = json.dumps({
+
+            if c_mode == 'usb':
+                with usb_status_lock:
+                    is_connected = (age < 5.0) and usb_camera_connected and (last_frame_time > 0)
+                    backend_val = active_usb_backend
+                    brightness_val = active_usb_brightness
+                    err_msg = usb_camera_message
+                camera_source = f"usb:{c_idx}"
+                camera_url = ""
+            else:
+                is_connected = (age < 5.0) and bool(c_url) and (last_frame_time > 0)
+                camera_source = c_url
+                camera_url = c_url
+                backend_val = None
+                brightness_val = None
+                err_msg = None
+
+            health_data = {
                 'status': 'ok',
                 'cameraConnected': is_connected,
-                'cameraUrl': c_url,
+                'cameraUrl': camera_url,
+                'cameraSource': camera_source,
                 'frameAge': round(age, 2),
                 'device': metrics['device'],
                 'deviceName': metrics['deviceName'],
                 'averageInferenceMs': metrics['avgInferenceMs'],
                 'detectionFps': metrics['detectionFps'],
-                'calibrated': metrics['calibrated']
+                'calibrated': metrics['calibrated'],
+                'backend': backend_val,
+                'brightness': brightness_val
+            }
+            if not is_connected and c_mode == 'usb':
+                health_data['message'] = err_msg or f"USB camera {c_idx} returns black frames"
+
+            payload = json.dumps(health_data).encode()
+            self.send_response(200)
+            self.send_header('Content-Type', 'application/json')
+            self.send_header('Access-Control-Allow-Origin', '*')
+            self.end_headers()
+            self.wfile.write(payload)
+
+        elif parsed_path == '/state':
+            with config_lock:
+                c_mode = camera_config.get('mode')
+                c_url = camera_config.get('url', '')
+                c_idx_raw = camera_config.get('index', 0)
+                try:
+                    c_idx = int(c_idx_raw) if c_idx_raw is not None else 0
+                except (ValueError, TypeError):
+                    c_idx = 0
+            with frame_lock:
+                age = time.time() - last_frame_time if last_frame_time > 0 else 999.0
+            with state_lock:
+                state_copy = list(slots_state)
+                detections_copy = list(latest_detections)
+
+            if c_mode == 'usb':
+                with usb_status_lock:
+                    is_connected = (age < 5.0) and usb_camera_connected and (last_frame_time > 0)
+                camera_source = f"usb:{c_idx}"
+                camera_url = ""
+            else:
+                is_connected = (age < 5.0) and bool(c_url) and (last_frame_time > 0)
+                camera_source = c_url
+                camera_url = c_url
+
+            metrics = get_health_metrics()
+            payload = json.dumps({
+                'cameraConnected': is_connected,
+                'cameraUrl': camera_url,
+                'cameraSource': camera_source,
+                'frameAge': round(age, 2),
+                'fps': metrics['detectionFps'],
+                'slots': state_copy,
+                'detections': detections_copy
             }).encode()
             self.send_response(200)
             self.send_header('Content-Type', 'application/json')
             self.send_header('Access-Control-Allow-Origin', '*')
             self.end_headers()
             self.wfile.write(payload)
-            
-        elif parsed_path == '/state':
+
+        elif parsed_path == '/usb-cameras':
             with config_lock:
-                c_url = camera_config.get('url', '')
+                c_mode = camera_config.get('mode')
+                c_idx_raw = camera_config.get('index', 0)
+                try:
+                    c_idx = int(c_idx_raw) if c_idx_raw is not None else 0
+                except (ValueError, TypeError):
+                    c_idx = 0
             with frame_lock:
                 age = time.time() - last_frame_time if last_frame_time > 0 else 999.0
-            with state_lock:
-                state_copy = list(slots_state)
-                detections_copy = list(latest_detections)
-            is_connected = (age < 5.0) and bool(c_url) and (last_frame_time > 0)
-            metrics = get_health_metrics()
-            payload = json.dumps({
-                'cameraConnected': is_connected,
-                'cameraUrl': c_url,
-                'frameAge': round(age, 2),
-                'fps': metrics['detectionFps'],
-                'slots': state_copy,
-                'detections': detections_copy
-            }).encode()
+
+            with usb_status_lock:
+                is_active_usb_connected = (c_mode == 'usb') and (age < 5.0) and usb_camera_connected
+                act_w = active_usb_width
+                act_h = active_usb_height
+                act_be = active_usb_backend
+                act_br = active_usb_brightness
+
+            cam_list = []
+            for i in range(10):
+                if is_active_usb_connected and i == c_idx:
+                    cam_list.append({
+                        'index': i,
+                        'available': True,
+                        'width': act_w or 1280,
+                        'height': act_h or 720,
+                        'backend': act_be,
+                        'brightness': act_br
+                    })
+                else:
+                    probe_cap, info = open_usb_capture(i)
+                    if probe_cap is not None:
+                        cam_list.append({
+                            'index': i,
+                            'available': True,
+                            'width': info['width'],
+                            'height': info['height'],
+                            'backend': info['backend'],
+                            'brightness': info['brightness']
+                        })
+                        probe_cap.release()
+                    else:
+                        cam_list.append({
+                            'index': i,
+                            'available': False,
+                            'width': 0,
+                            'height': 0,
+                            'backend': None,
+                            'brightness': None
+                        })
+
+            payload = json.dumps({'cameras': cam_list}).encode()
             self.send_response(200)
             self.send_header('Content-Type', 'application/json')
             self.send_header('Access-Control-Allow-Origin', '*')
@@ -836,9 +1172,14 @@ class SlotMonitorHandler(BaseHTTPRequestHandler):
                 with config_lock:
                     if cam_data:
                         old_url = camera_config.get('url', '')
+                        old_mode = camera_config.get('mode', '')
+                        old_idx = camera_config.get('index', None)
                         new_url = cam_data.get('url', '')
+                        new_mode = cam_data.get('mode', '')
+                        new_idx = cam_data.get('index', None)
+                        camera_config.clear()
                         camera_config.update(cam_data)
-                        if new_url != old_url:
+                        if new_url != old_url or new_mode != old_mode or new_idx != old_idx:
                             with frame_lock:
                                 last_frame_time = 0
                                 latest_frame = None

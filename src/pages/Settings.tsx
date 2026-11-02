@@ -104,12 +104,30 @@ export function Settings() {
 
   const handleCameraUpdate = async (camera: any) => {
     const changes = cameraEdits[String(camera.id)] || {};
-    if (!changes.type && !changes.location && !changes.slot_range && !changes.device_id && changes.ip_address === undefined) {
+    if (!changes.type && !changes.location && !changes.slot_range && !changes.device_id && changes.ip_address === undefined && changes.connection_method === undefined) {
       setSaveMsg('No changes to save.');
       return;
     }
 
+    const effectiveMethod = changes.connection_method ?? camera.connection_method ?? 'device';
+    const effectiveIp = changes.ip_address !== undefined ? changes.ip_address : camera.ip_address;
+
+    if (effectiveMethod === 'ip' && (!effectiveIp || !String(effectiveIp).trim())) {
+      setSaveMsg('Enter an IP address for this camera.');
+      return;
+    }
+    if (effectiveMethod === 'usb') {
+      const idx = Number(effectiveIp);
+      if (effectiveIp === '' || effectiveIp === null || effectiveIp === undefined || isNaN(idx) || !Number.isInteger(idx) || idx < 0 || idx > 9) {
+        setSaveMsg('USB camera number must be an integer from 0 to 9.');
+        return;
+      }
+    }
+
     const { device_id, ...baseChanges } = changes;
+    if (effectiveMethod === 'usb') {
+      baseChanges.device_id = null;
+    }
     const { error } = Object.keys(baseChanges).length > 0
       ? await supabase.from('cameras').update(baseChanges).eq('id', camera.id)
       : { error: null };
@@ -118,14 +136,14 @@ export function Settings() {
       return;
     }
 
-    if (device_id !== undefined) {
+    if (effectiveMethod !== 'usb' && device_id !== undefined) {
       const { error: deviceError } = await supabase.from('cameras').update({ device_id }).eq('id', camera.id);
       if (deviceError) {
         setSaveMsg('Camera saved. Run the device assignment migration in Supabase to save the selected device.');
       }
     }
 
-    setCameras(prev => prev.map((c: any) => c.id === camera.id ? { ...c, ...changes } : c));
+    setCameras(prev => prev.map((c: any) => c.id === camera.id ? { ...c, ...changes, ...(effectiveMethod === 'usb' ? { device_id: null } : {}) } : c));
     await logActivity('Updated camera', 'Camera & Vision', { camera_id: camera.id, changes });
     setCameraEdits(prev => ({ ...prev, [String(camera.id)]: {} }));
     setSaveMsg('Camera updated successfully.');
@@ -141,13 +159,25 @@ export function Settings() {
       setSaveMsg('Enter an IP address for this camera.');
       return;
     }
+    if (newCamera.connection_method === 'usb') {
+      const idx = Number(newCamera.ip_address);
+      if (newCamera.ip_address === '' || isNaN(idx) || !Number.isInteger(idx) || idx < 0 || idx > 9) {
+        setSaveMsg('USB camera number must be an integer from 0 to 9.');
+        return;
+      }
+    }
     if (newCamera.connection_method === 'device' && !newCamera.device_id) {
       setSaveMsg('Select a device for this camera.');
       return;
     }
 
     const { device_id, ...cameraFields } = newCamera;
-    const { data, error } = await supabase.from('cameras').insert({ ...cameraFields, is_online: true }).select();
+    const insertPayload = {
+      ...cameraFields,
+      device_id: newCamera.connection_method === 'usb' ? null : (device_id || null),
+      is_online: true
+    };
+    const { data, error } = await supabase.from('cameras').insert(insertPayload).select();
 
     if (error) {
       setSaveMsg('Error adding camera: ' + error.message);
@@ -156,7 +186,7 @@ export function Settings() {
 
     if (data && data.length > 0) {
       let addedCamera = data[0];
-      if (device_id) {
+      if (newCamera.connection_method !== 'usb' && device_id) {
         const { data: assignedCamera, error: deviceError } = await supabase.from('cameras').update({ device_id }).eq('id', addedCamera.id).select().single();
         if (assignedCamera && !deviceError) {
           addedCamera = assignedCamera;
@@ -252,13 +282,37 @@ export function Settings() {
                       <input value={newCamera.slot_range} onChange={e => setNewCamera(prev => ({ ...prev, slot_range: e.target.value }))} placeholder="A1-A4" />
                     </div>
                     <div className="form-group">
-                      <label>Device</label>
-                      <select value={newCamera.connection_method} onChange={e => setNewCamera(prev => ({ ...prev, connection_method: e.target.value }))}>
+                      <label>Connection Method</label>
+                      <select
+                        value={newCamera.connection_method}
+                        onChange={e => setNewCamera(prev => ({
+                          ...prev,
+                          connection_method: e.target.value,
+                          ip_address: e.target.value === 'usb' && !prev.ip_address ? '0' : prev.ip_address
+                        }))}
+                      >
                         <option value="device">Local device</option>
                         <option value="ip">IP camera</option>
+                        <option value="usb">USB webcam (via detection service)</option>
                       </select>
                     </div>
-                    {newCamera.connection_method === 'ip' ? (
+                    {newCamera.connection_method === 'usb' ? (
+                      <div className="form-group">
+                        <label>USB camera number (0, 1, 2...)</label>
+                        <input
+                          type="number"
+                          min={0}
+                          max={9}
+                          step={1}
+                          value={newCamera.ip_address}
+                          onChange={e => setNewCamera(prev => ({ ...prev, ip_address: e.target.value }))}
+                          placeholder="0"
+                        />
+                        <span className="form-hint" style={{marginTop: 4, display: 'inline-block'}}>
+                          USB device index (0-9) probed by the Python slot service.
+                        </span>
+                      </div>
+                    ) : newCamera.connection_method === 'ip' ? (
                       <div className="form-group">
                         <label>IP Address</label>
                         <input value={newCamera.ip_address} onChange={e => setNewCamera(prev => ({ ...prev, ip_address: e.target.value }))} placeholder="192.168.1.100:8080" />
@@ -301,11 +355,14 @@ export function Settings() {
                 <div>
                   <h3 style={{ fontSize: '13px', fontWeight: 600, marginBottom: '12px' }}>Camera Setup</h3>
                   <table className="data-table">
-                    <thead><tr><th>Name</th><th>Type</th><th>Location</th><th>Slot Range</th><th>Device / IP</th><th>Status</th><th>Action</th></tr></thead>
+                    <thead><tr><th>Name</th><th>Type</th><th>Location</th><th>Slot Range</th><th>Connection</th><th>Device / Source</th><th>Status</th><th>Action</th></tr></thead>
                     <tbody>
                       {cameras.map(c => {
                         const edit = cameraEdits[String(c.id)] || {};
-                        const isIpCam = c.connection_method === 'ip';
+                        const connMethod = edit.connection_method ?? c.connection_method ?? 'device';
+                        const isUsb = connMethod === 'usb';
+                        const isIpCam = connMethod === 'ip';
+                        const currentIp = edit.ip_address !== undefined ? edit.ip_address : (c.ip_address || '');
                         return (
                           <tr key={c.id}>
                             <td>{c.name}</td>
@@ -323,10 +380,43 @@ export function Settings() {
                               <input type="text" value={(edit.slot_range ?? c.slot_range) || ''} onChange={e => updateCameraEdit(c.id, 'slot_range', e.target.value)} placeholder="A1-A4" />
                             </td>
                             <td>
-                              {isIpCam ? (
+                              <select
+                                value={connMethod}
+                                onChange={e => {
+                                  const val = e.target.value;
+                                  updateCameraEdit(c.id, 'connection_method', val);
+                                  if (val === 'usb' && edit.ip_address === undefined && (!c.ip_address || isNaN(Number(c.ip_address)))) {
+                                    updateCameraEdit(c.id, 'ip_address', '0');
+                                  }
+                                }}
+                              >
+                                <option value="device">Local device</option>
+                                <option value="ip">IP camera</option>
+                                <option value="usb">USB webcam (via detection service)</option>
+                              </select>
+                            </td>
+                            <td>
+                              {isUsb ? (
+                                <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                                  <span style={{ fontSize: 12, fontWeight: 600, color: 'var(--text-color)', whiteSpace: 'nowrap' }}>
+                                    USB #{currentIp !== '' ? currentIp : '0'}
+                                  </span>
+                                  <input
+                                    type="number"
+                                    min={0}
+                                    max={9}
+                                    step={1}
+                                    value={currentIp !== '' ? currentIp : '0'}
+                                    onChange={e => updateCameraEdit(c.id, 'ip_address', e.target.value)}
+                                    placeholder="0"
+                                    style={{ width: 60, padding: '4px 6px' }}
+                                    title="USB camera number (0, 1, 2...)"
+                                  />
+                                </div>
+                              ) : isIpCam ? (
                                 <input
                                   type="text"
-                                  value={(edit.ip_address ?? c.ip_address) || ''}
+                                  value={currentIp}
                                   onChange={e => updateCameraEdit(c.id, 'ip_address', e.target.value)}
                                   placeholder="192.168.1.100:8080"
                                   style={{ minWidth: '150px' }}
@@ -348,7 +438,7 @@ export function Settings() {
                           </tr>
                         );
                       })}
-                      {cameras.length === 0 && <tr><td colSpan={7} className="empty-state">No cameras configured</td></tr>}
+                      {cameras.length === 0 && <tr><td colSpan={8} className="empty-state">No cameras configured</td></tr>}
                     </tbody>
                   </table>
                 </div>

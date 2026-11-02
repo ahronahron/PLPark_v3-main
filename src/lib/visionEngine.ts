@@ -3215,6 +3215,14 @@ function doesBboxOverlapPolygon(
 }
 
 /**
+ * usesBackendCamera — Returns true if camera routes through the Python slot service (IP or USB).
+ */
+export function usesBackendCamera(camera?: { connection_method?: string | null } | null): boolean {
+  if (!camera) return false;
+  return camera.connection_method === 'ip' || camera.connection_method === 'usb';
+}
+
+/**
  * SlotMonitorProcessor — Monitors parking slot occupancy using YOLO vehicle
  * detection and AOI polygon intersection.
  *
@@ -3311,7 +3319,7 @@ export class SlotMonitorProcessor {
    * startCamera — Opens the camera stream and attaches to a video element.
    */
   async startCamera(deviceId: string, videoEl: HTMLVideoElement, cameraConfig?: any): Promise<void> {
-    if (cameraConfig?.connection_method === 'ip') {
+    if (usesBackendCamera(cameraConfig)) {
       this.ipMode = true;
       this.cameraConfig = cameraConfig;
       this.ipConfigSent = 0;
@@ -3466,8 +3474,12 @@ export class SlotMonitorProcessor {
     this.isPollingIp = true;
     try {
       const now = Date.now();
-      let url = this.cameraConfig?.ip_address || '';
-      if (url && !url.startsWith('http')) url = 'http://' + url;
+      const isUsb = this.cameraConfig?.connection_method === 'usb';
+      let url = '';
+      if (!isUsb) {
+        url = this.cameraConfig?.ip_address || '';
+        if (url && !url.startsWith('http')) url = 'http://' + url;
+      }
 
       // Extract comparable slot configuration (ids, polygons, and vehicleType)
       const comparableSlots = this.slots.map(s => ({
@@ -3476,20 +3488,24 @@ export class SlotMonitorProcessor {
         polygon: s.polygon,
         vehicleType: s.vehicleType
       }));
+      const cameraPayload = isUsb
+        ? { mode: 'usb', index: Number(this.cameraConfig?.ip_address || 0) }
+        : { mode: 'mjpeg', url };
       const configObj = {
-        camera: { url, mode: 'mjpeg' },
+        camera: cameraPayload,
         slots: comparableSlots
       };
       const currentConfigJson = JSON.stringify(configObj);
       const configChanged = currentConfigJson !== this.lastSentConfigJson;
       const keepAliveDue = (now - this.ipConfigSent) > 30000;
 
-      // Only POST /config when url or slots actually change or keep-alive is due (every 30s)
+      // Only POST /config when url/index or slots actually change or keep-alive is due (every 30s)
       // Never send an empty slots list if we have active slots
-      if ((configChanged || keepAliveDue) && url) {
-        console.log(`[SlotMonitor IP] POSTing /config (${comparableSlots.length} slots sent, changed=${configChanged}, keepAlive=${keepAliveDue})`);
+      const hasValidSource = isUsb || Boolean(url);
+      if ((configChanged || keepAliveDue) && hasValidSource) {
+        console.log(`[SlotMonitor ${isUsb ? 'USB' : 'IP'}] POSTing /config (${comparableSlots.length} slots sent, changed=${configChanged}, keepAlive=${keepAliveDue})`);
         comparableSlots.forEach(s => {
-          console.log(`[SlotMonitor IP] Slot "${s.slotId}" (dbId: ${s.dbId}) sent with vehicleType: "${s.vehicleType}"`);
+          console.log(`[SlotMonitor ${isUsb ? 'USB' : 'IP'}] Slot "${s.slotId}" (dbId: ${s.dbId}) sent with vehicleType: "${s.vehicleType}"`);
         });
         this.ipConfigSent = now;
         this.lastSentConfigJson = currentConfigJson;
@@ -3497,10 +3513,10 @@ export class SlotMonitorProcessor {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify(configObj)
-        }).then(res => console.log('[SlotMonitor IP] /config response:', res.status))
+        }).then(res => console.log(`[SlotMonitor ${isUsb ? 'USB' : 'IP'}] /config response:`, res.status))
           .catch(e => {
-            console.warn('[SlotMonitor IP] Config error', e);
-            this.ipErrorCallbacks.forEach(cb => cb(`IP camera config error: ${e.message || e}`));
+            console.warn(`[SlotMonitor ${isUsb ? 'USB' : 'IP'}] Config error`, e);
+            this.ipErrorCallbacks.forEach(cb => cb(`${isUsb ? 'USB' : 'IP'} camera config error: ${e.message || e}`));
           });
       }
       

@@ -172,6 +172,8 @@ export function Dashboard() {
     const matching = cameras.filter(c => c.type === tab);
     if (matching.length > 0) {
       setActiveCamera(matching[0]);
+    } else {
+      setActiveCamera(null);
     }
   };
 

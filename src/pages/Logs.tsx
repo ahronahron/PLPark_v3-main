@@ -51,6 +51,7 @@ export function Logs({ readOnly = false }: { readOnly?: boolean }) {
 
   /** Modals */
   const [viewSession, setViewSession] = useState<ParkingSession | null>(null);
+  const [viewScan, setViewScan] = useState<PlateRecognition | null>(null);
   const [viewPayment, setViewPayment] = useState<Payment | null>(null);
   const [manageExitSession, setManageExitSession] = useState<ParkingSession | null>(null);
   const [exitConfirmSession, setExitConfirmSession] = useState<ParkingSession | null>(null);
@@ -423,19 +424,42 @@ export function Logs({ readOnly = false }: { readOnly?: boolean }) {
     setViewSession({ ...session, image_url: getSessionImageUrl(session) });
   };
 
-  const unmatchedEntryScans = statusFilter === 'all'
-    ? recognitions.filter(recognition => {
-      if (recognition.direction !== 'entry') return false;
+  const getScanExplanation = (scan: PlateRecognition) => {
+    const normalizedScanPlate = scan.plate_number.toUpperCase().replace(/[\s-]+/g, '');
+    const activeSession = sessions.find(s =>
+      s.status === 'active' &&
+      s.plate_number.toUpperCase().replace(/[\s-]+/g, '') === normalizedScanPlate
+    );
+    if (activeSession) {
+      const formattedEntry = new Date(activeSession.entry_time).toLocaleString();
+      return `Repeat scan: this vehicle already has an active session since ${formattedEntry}`;
+    }
+    const anySession = sessions.find(s =>
+      s.plate_number.toUpperCase().replace(/[\s-]+/g, '') === normalizedScanPlate
+    );
+    if (anySession) {
+      return 'Scan outside the session time window';
+    }
+    return 'No session was created for this scan (the entry was blocked or failed)';
+  };
 
-      const normalizedPlate = recognition.plate_number.toUpperCase().replace(/[\s-]+/g, '');
-      const recognitionTime = new Date(recognition.created_at).getTime();
-      const hasMatchingSession = sessions.some(session => {
-        const samePlate = session.plate_number.toUpperCase().replace(/[\s-]+/g, '') === normalizedPlate;
-        const entryTime = new Date(session.entry_time).getTime();
-        return samePlate && Math.abs(entryTime - recognitionTime) <= 5 * 60 * 1000;
-      });
-      if (hasMatchingSession) return false;
+  const allUnmatchedEntryScans = recognitions.filter(recognition => {
+    if (recognition.direction !== 'entry') return false;
 
+    const normalizedPlate = recognition.plate_number.toUpperCase().replace(/[\s-]+/g, '');
+    const recognitionTime = new Date(recognition.created_at).getTime();
+    const hasMatchingSession = sessions.some(session => {
+      const samePlate = session.plate_number.toUpperCase().replace(/[\s-]+/g, '') === normalizedPlate;
+      const entryTime = new Date(session.entry_time).getTime();
+      return samePlate && Math.abs(entryTime - recognitionTime) <= 5 * 60 * 1000;
+    });
+    return !hasMatchingSession;
+  });
+
+  const unmatchedScansCount = allUnmatchedEntryScans.length;
+
+  const unmatchedEntryScans = statusFilter === 'scans'
+    ? allUnmatchedEntryScans.filter(recognition => {
       if (!searchQuery.trim()) return true;
       const query = searchQuery.toLowerCase().trim();
       return recognition.plate_number.toLowerCase().includes(query) ||
@@ -443,18 +467,17 @@ export function Logs({ readOnly = false }: { readOnly?: boolean }) {
     })
     : [];
 
-  const vehicleLogRows = [
-    ...filteredSessions.map(session => ({
-      kind: 'session' as const,
-      timestamp: new Date(session.entry_time).getTime(),
-      session,
-    })),
-    ...unmatchedEntryScans.map(recognition => ({
-      kind: 'scan' as const,
-      timestamp: new Date(recognition.created_at).getTime(),
-      recognition,
-    })),
-  ].sort((a, b) => b.timestamp - a.timestamp);
+  const vehicleLogRows = statusFilter === 'scans'
+    ? unmatchedEntryScans.map(recognition => ({
+        kind: 'scan' as const,
+        timestamp: new Date(recognition.created_at).getTime(),
+        recognition,
+      })).sort((a, b) => b.timestamp - a.timestamp)
+    : filteredSessions.map(session => ({
+        kind: 'session' as const,
+        timestamp: new Date(session.entry_time).getTime(),
+        session,
+      })).sort((a, b) => b.timestamp - a.timestamp);
 
   const renderVehicles = () => (
     <div className="logs-content-section">
@@ -468,7 +491,7 @@ export function Logs({ readOnly = false }: { readOnly?: boolean }) {
             onChange={e => setSearchQuery(e.target.value)}
           />
         </div>
-        <div className="toolbar-actions">
+        <div className="toolbar-actions" style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
           <select
             value={statusFilter}
             onChange={e => setStatusFilter(e.target.value)}
@@ -477,7 +500,31 @@ export function Logs({ readOnly = false }: { readOnly?: boolean }) {
             <option value="all">All Sessions</option>
             <option value="active">Active Sessions</option>
             <option value="completed">Completed</option>
+            <option value="scans">Scans without session</option>
           </select>
+          {unmatchedScansCount > 0 && (
+            <span
+              className="badge-unmatched-scans"
+              style={{
+                fontSize: '11px',
+                fontWeight: 600,
+                padding: '4px 9px',
+                borderRadius: '12px',
+                background: 'rgba(245, 158, 11, 0.12)',
+                color: '#d97706',
+                border: '1px solid rgba(245, 158, 11, 0.3)',
+                whiteSpace: 'nowrap',
+                display: 'inline-flex',
+                alignItems: 'center',
+                gap: '4px',
+                cursor: 'pointer',
+              }}
+              onClick={() => setStatusFilter('scans')}
+              title="Click to view scans without session"
+            >
+              <span>{unmatchedScansCount} {unmatchedScansCount === 1 ? 'scan' : 'scans'} without session</span>
+            </span>
+          )}
         </div>
       </div>
 
@@ -500,7 +547,7 @@ export function Logs({ readOnly = false }: { readOnly?: boolean }) {
             if (row.kind === 'scan') {
               const { recognition } = row;
               return (
-                <tr key={`scan-${recognition.id}`}>
+                <tr key={`scan-${recognition.id}`} className="logs-interactive-row" onClick={() => setViewScan(recognition)}>
                   <td className="mono font-bold">{recognition.plate_number}</td>
                   <td>Guest</td>
                   <td>
@@ -514,7 +561,7 @@ export function Logs({ readOnly = false }: { readOnly?: boolean }) {
                   <td>—</td>
                   <td>
                     {recognition.image_url ? (
-                      <div className="flex items-center gap-2">
+                      <div className="flex items-center gap-2" onClick={e => e.stopPropagation()}>
                         <img
                           src={recognition.image_url}
                           alt={`Entrance snapshot for ${recognition.plate_number}`}
@@ -533,7 +580,18 @@ export function Logs({ readOnly = false }: { readOnly?: boolean }) {
                     )}
                   </td>
                   <td><span className="status-badge scan-recorded">Scanned</span></td>
-                  <td><span className="text-muted text-xs">No session</span></td>
+                  <td onClick={e => e.stopPropagation()}>
+                    <div className="row-actions">
+                      <button
+                        className="action-btn"
+                        title="Quick look scan details"
+                        onClick={() => setViewScan(recognition)}
+                      >
+                        <IconView size={14} />
+                      </button>
+                      <span className="text-muted text-xs">No session</span>
+                    </div>
+                  </td>
                 </tr>
               );
             }
@@ -612,7 +670,13 @@ export function Logs({ readOnly = false }: { readOnly?: boolean }) {
               </tr>
             );
           })}
-          {vehicleLogRows.length === 0 && <tr><td colSpan={9} className="empty-state">No vehicle logs found</td></tr>}
+          {vehicleLogRows.length === 0 && (
+            <tr>
+              <td colSpan={9} className="empty-state">
+                {statusFilter === 'scans' ? 'No scans without session found' : 'No vehicle logs found'}
+              </td>
+            </tr>
+          )}
         </tbody>
       </table>
     </div>
@@ -868,7 +932,107 @@ export function Logs({ readOnly = false }: { readOnly?: boolean }) {
         </div>
       )}
 
-      {/* ===== 2. PAYMENT RECEIPT QUICK LOOK MODAL ===== */}
+      {/* ===== 1b. SCAN RECOGNITION DETAILS MODAL ===== */}
+      {viewScan && (
+        <div className="modal-overlay" onClick={() => setViewScan(null)}>
+          <div className="modal-container quick-look-modal" onClick={e => e.stopPropagation()}>
+            <div className="modal-header">
+              <div className="quick-look-title-bar">
+                <span className="status-badge scan-recorded">
+                  SCANNED
+                </span>
+                <h3>Scan Recognition Details</h3>
+              </div>
+              <button className="close-btn" onClick={() => setViewScan(null)}>×</button>
+            </div>
+
+            <div className="modal-body">
+              <div className="quick-look-banner">
+                {viewScan.image_url ? (
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: '6px', alignItems: 'center', flexShrink: 0 }}>
+                    <img src={viewScan.image_url} alt="Scan snapshot" className="quick-look-image" />
+                    <button
+                      type="button"
+                      className="action-btn"
+                      style={{ fontSize: '11px', padding: '2px 8px', display: 'inline-flex', alignItems: 'center', gap: '4px', width: 'auto' }}
+                      onClick={() => window.open(viewScan.image_url || undefined, '_blank', 'noopener,noreferrer')}
+                      title="View full image in new tab"
+                    >
+                      <IconView size={12} />
+                      <span>View full image</span>
+                    </button>
+                  </div>
+                ) : (
+                  <div className="quick-look-icon-placeholder">
+                    {viewScan.vehicle_type === 'motorcycle' ? <IconMotorcycle size={36} /> : <IconCar size={36} />}
+                  </div>
+                )}
+
+                <div className="quick-look-plate-info">
+                  <div className="quick-look-plate">{viewScan.plate_number}</div>
+                  <div className="quick-look-type-row">
+                    <span className="quick-look-type capitalize">{viewScan.vehicle_type || 'Unknown'}</span>
+                    <span>•</span>
+                    <span className="quick-look-conf">Confidence: {viewScan.confidence}%</span>
+                  </div>
+                  <div className="quick-look-cam">Camera: <strong>{viewScan.camera_name || 'Camera Feed'}</strong></div>
+                </div>
+              </div>
+
+              {/* Status Explanation */}
+              <div
+                style={{
+                  padding: '10px 14px',
+                  borderRadius: '6px',
+                  background: 'rgba(245, 158, 11, 0.08)',
+                  border: '1px solid rgba(245, 158, 11, 0.25)',
+                  fontSize: '12px',
+                  color: 'var(--cursor-text)',
+                  marginBottom: '14px',
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: '8px',
+                  lineHeight: '1.4',
+                }}
+              >
+                <span style={{ color: '#d97706', fontSize: '15px', fontWeight: 'bold', flexShrink: 0 }}>ℹ</span>
+                <span>{getScanExplanation(viewScan)}</span>
+              </div>
+
+              <div className="quick-look-grid">
+                <div className="quick-look-cell">
+                  <span className="cell-label">Plate Number</span>
+                  <span className="cell-val mono font-bold">{viewScan.plate_number}</span>
+                </div>
+                <div className="quick-look-cell">
+                  <span className="cell-label">Vehicle Type</span>
+                  <span className="cell-val capitalize">{viewScan.vehicle_type || '—'}</span>
+                </div>
+                <div className="quick-look-cell">
+                  <span className="cell-label">Confidence</span>
+                  <span className="cell-val">{viewScan.confidence}%</span>
+                </div>
+                <div className="quick-look-cell">
+                  <span className="cell-label">Camera Name</span>
+                  <span className="cell-val">{viewScan.camera_name || 'Camera Feed'}</span>
+                </div>
+                <div className="quick-look-cell">
+                  <span className="cell-label">Scan Time</span>
+                  <span className="cell-val">{new Date(viewScan.created_at).toLocaleString()}</span>
+                </div>
+                <div className="quick-look-cell">
+                  <span className="cell-label">Direction</span>
+                  <span className="cell-val capitalize">{viewScan.direction || 'Entry'}</span>
+                </div>
+              </div>
+
+              <div className="clean-modal-actions" style={{ marginTop: '16px' }}>
+                <button className="btn-secondary" onClick={() => setViewScan(null)}>Close</button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
       {viewPayment && (
         <div className="modal-overlay" onClick={() => setViewPayment(null)}>
           <div className="modal-container quick-look-modal" onClick={e => e.stopPropagation()}>

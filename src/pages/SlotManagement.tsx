@@ -4,6 +4,7 @@ import { IconBan, IconCamera, IconCar, IconCheck, IconEdit, IconLock, IconMore, 
 import {
   CameraManager,
   SlotMonitorProcessor,
+  usesBackendCamera,
   type CameraDevice,
   type Detection,
   type PipelineStatus,
@@ -292,9 +293,9 @@ function CameraPanel({
   const [showDebug, setShowDebug] = useState(false);
   const [debugState, setDebugState] = useState<any>(null);
 
-  // Poll /state every second for the debug panel when active camera is IP
+  // Poll /state every second for the debug panel when active camera is backend (IP or USB)
   useEffect(() => {
-    if (camera.connection_method !== 'ip') return;
+    if (!usesBackendCamera(camera)) return;
     const interval = setInterval(() => {
       fetch(`${slotMonitorUrl}/state`)
         .then(res => res.json())
@@ -311,23 +312,25 @@ function CameraPanel({
   const [isCalibrated, setIsCalibrated] = useState<boolean | null>(null);
   const [calibrateMsg, setCalibrateMsg] = useState('');
 
-  // IP Camera Health & Connection State
+  // Backend Camera Health & Connection State
   const [ipFeedStatus, setIpFeedStatus] = useState<{ status: 'connecting' | 'connected' | 'error'; message: string }>({
     status: 'connecting',
     message: 'Connecting...'
   });
 
-  // Poll /health every second when active camera is IP
+  // Poll /health every second when active camera is backend (IP or USB)
   useEffect(() => {
-    if (camera.connection_method !== 'ip') return;
+    if (!usesBackendCamera(camera)) return;
 
+    const isUsb = camera.connection_method === 'usb';
     const rawUrl = (camera.ip_address || '').trim();
-    const formattedUrl = rawUrl ? (rawUrl.startsWith('http') ? rawUrl : `http://${rawUrl}`) : '';
+    const formattedUrl = (!isUsb && rawUrl) ? (rawUrl.startsWith('http') ? rawUrl : `http://${rawUrl}`) : '';
+    const usbIndex = isUsb ? Number(rawUrl || 0) : null;
 
     // Reset displayed status when camera changes until /health confirms
     setIpFeedStatus({
       status: 'connecting',
-      message: rawUrl ? `Connecting to ${rawUrl}...` : 'No IP address configured'
+      message: isUsb ? `Connecting to USB camera #${usbIndex}...` : (rawUrl ? `Connecting to ${rawUrl}...` : 'No IP address configured')
     });
 
     const pollHealth = async () => {
@@ -340,21 +343,29 @@ function CameraPanel({
           setIsCalibrated(data.calibrated);
         }
 
-        const norm = (u: string) => (u ? (u.startsWith('http') ? u : `http://${u}`).replace(/\/+$/, '').toLowerCase() : '');
-        const expectedNorm = norm(formattedUrl);
-        const returnedNorm = norm(data.cameraUrl || data.url || '');
-        const urlMatches = Boolean(expectedNorm && returnedNorm && expectedNorm === returnedNorm);
+        let sourceMatches = false;
+        if (isUsb) {
+          const expectedSource = `usb:${usbIndex}`;
+          sourceMatches = data.cameraSource === expectedSource || (!data.cameraSource && Boolean(data.cameraConnected));
+        } else {
+          const norm = (u: string) => (u ? (u.startsWith('http') ? u : `http://${u}`).replace(/\/+$/, '').toLowerCase() : '');
+          const expectedNorm = norm(formattedUrl);
+          const returnedNorm = norm(data.cameraUrl || data.url || (data.cameraSource && !data.cameraSource.startsWith('usb:') ? data.cameraSource : '') || '');
+          sourceMatches = Boolean(expectedNorm && returnedNorm && expectedNorm === returnedNorm);
+        }
 
-        // Confirmed when cameraConnected is true, frame arrived within last 5s, and URL matches
-        const isOk = Boolean(data.cameraConnected && urlMatches && (data.frameAge !== undefined ? data.frameAge < 5 : true));
+        // Confirmed when cameraConnected is true, frame arrived within last 5s, and source matches
+        const isOk = Boolean(data.cameraConnected && sourceMatches && (data.frameAge !== undefined ? data.frameAge < 5 : true));
 
+        const cameraLabel = isUsb ? `USB #${usbIndex}` : (rawUrl || 'camera');
         if (isOk) {
           setIpFeedStatus({ status: 'connected', message: 'Camera feed OK' });
         } else {
-          setIpFeedStatus({ status: 'error', message: `No frames from ${rawUrl || 'camera'}` });
+          setIpFeedStatus({ status: 'error', message: `No frames from ${cameraLabel}` });
         }
       } catch {
-        setIpFeedStatus({ status: 'error', message: `No frames from ${rawUrl || 'camera'}` });
+        const cameraLabel = isUsb ? `USB #${usbIndex}` : (rawUrl || 'camera');
+        setIpFeedStatus({ status: 'error', message: `No frames from ${cameraLabel}` });
       }
     };
 
@@ -454,7 +465,7 @@ function CameraPanel({
 
   // Monitoring controls
   const handleStartMonitoring = async () => {
-    if (camera.connection_method !== 'ip' && !videoRef.current) return;
+    if (!usesBackendCamera(camera) && !videoRef.current) return;
     setMonitorError('');
     try {
       setInitProgress('Starting...');
@@ -492,7 +503,7 @@ function CameraPanel({
     } catch (err: any) { setMonitorError(err.message || 'Failed to start monitoring'); setInitProgress(''); }
   };
 
-  // Cleanly switch cameras: stop previous processor, POST /config with new camera URL, and auto-start monitoring on IP cameras
+  // Cleanly switch cameras: stop previous processor, POST /config with new camera, and auto-start monitoring on backend cameras
   useEffect(() => {
     let cancelled = false;
 
@@ -505,9 +516,11 @@ function CameraPanel({
       setDetections([]);
       setMonitorStatus('idle');
 
-      if (camera.connection_method === 'ip' && camera.ip_address) {
+      const isUsb = camera.connection_method === 'usb';
+      const hasConfig = isUsb || Boolean(camera.ip_address);
+      if (usesBackendCamera(camera) && hasConfig) {
         const rawUrl = (camera.ip_address || '').trim();
-        const formattedUrl = rawUrl ? (rawUrl.startsWith('http') ? rawUrl : `http://${rawUrl}`) : '';
+        const formattedUrl = (!isUsb && rawUrl) ? (rawUrl.startsWith('http') ? rawUrl : `http://${rawUrl}`) : '';
         const comparableSlots = slots
           .filter(slot => aoiMap[slot.id]?.points.length >= 3)
           .map(slot => ({
@@ -522,13 +535,17 @@ function CameraPanel({
           console.log(`  -> Slot "${s.slotId}" (dbId: ${s.dbId}): vehicleType="${s.vehicleType}"`);
         });
 
-        // POST /config with new camera's URL immediately when selected camera changes
+        const cameraPayload = isUsb
+          ? { mode: 'usb', index: Number(camera.ip_address || 0) }
+          : { mode: 'mjpeg', url: formattedUrl };
+
+        // POST /config with new camera's config immediately when selected camera changes
         try {
           await fetch(`${slotMonitorUrl}/config`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
-              camera: { url: formattedUrl, mode: 'mjpeg' },
+              camera: cameraPayload,
               slots: comparableSlots,
               replaceAll: true
             })
@@ -598,19 +615,19 @@ function CameraPanel({
         </div>
 
         <div className="camera-feed-body" onMouseMove={handleMove} onMouseUp={() => setDragIdx(null)} onMouseLeave={() => setDragIdx(null)}>
-          {camera.connection_method === 'ip' ? (
-            camera.ip_address ? (
+          {usesBackendCamera(camera) ? (
+            (camera.connection_method === 'usb' || camera.ip_address) ? (
               <img 
                 className="camera-video-element" 
                 style={{ display: 'block', width: '100%', height: '100%', objectFit: 'cover' }} 
                 src={`${import.meta.env.VITE_SLOT_MONITOR_URL || 'http://127.0.0.1:8766'}/${editingSlotId ? 'raw' : 'preview'}.mjpg?t=${camera.id}_${editingSlotId ? 'raw' : 'preview'}`}
-                alt="IP Camera Stream"
+                alt={`${camera.connection_method === 'usb' ? 'USB' : 'IP'} Camera Stream`}
               />
             ) : null
           ) : (
             <video ref={videoRef} className="camera-video-element" playsInline muted style={{ display: isMonitoring ? 'block' : 'none' }} />
           )}
-          {camera.connection_method !== 'ip' && <canvas ref={overlayRef} className="camera-overlay-canvas" style={{ display: isMonitoring ? 'block' : 'none' }} />}
+          {!usesBackendCamera(camera) && <canvas ref={overlayRef} className="camera-overlay-canvas" style={{ display: isMonitoring ? 'block' : 'none' }} />}
 
           {!isMonitoring && !initProgress && (
             <div className="camera-placeholder">
@@ -621,7 +638,7 @@ function CameraPanel({
 
           {initProgress && (<div className="camera-init-overlay"><div className="camera-init-spinner" /><span>{initProgress}</span></div>)}
 
-          {camera.connection_method === 'ip' ? (
+          {usesBackendCamera(camera) ? (
             ipFeedStatus.status === 'connected' ? (
               <div className="camera-status-badge status-confirmed" style={{ textTransform: 'none', background: 'rgba(22, 163, 74, 0.35)', color: '#86efac' }}>
                 <span className="camera-status-dot" style={{ background: '#22c55e' }} /> Camera feed OK
@@ -679,10 +696,10 @@ function CameraPanel({
 
         {/* Monitoring controls */}
         <div className="slot-monitor-controls">
-          {camera.connection_method === 'ip' ? (
+          {usesBackendCamera(camera) ? (
             <div style={{ flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '6px 12px', gap: 10, flexWrap: 'wrap' }}>
               <div style={{ fontSize: 13, color: 'var(--text-muted)' }}>
-                Monitoring via Python IP Camera Backend ({camera.ip_address})
+                Monitoring via Python {camera.connection_method === 'usb' ? `USB Camera (#${camera.ip_address || 0})` : `IP Camera (${camera.ip_address})`} Backend
                 {isCalibrated !== null && (
                   <span style={{ marginLeft: 8, fontSize: 11, padding: '2px 6px', borderRadius: 4, background: isCalibrated ? 'rgba(34,197,94,0.15)' : 'rgba(234,179,8,0.15)', color: isCalibrated ? '#22c55e' : '#eab308' }}>
                     {isCalibrated ? '✓ Calibrated' : 'Not calibrated'}
@@ -739,8 +756,8 @@ function CameraPanel({
 
         {monitorError && (<div className="camera-error-bar"><span>⚠ {monitorError}</span><button onClick={() => setMonitorError('')}>✕</button></div>)}
 
-        {/* IP Camera Debug Panel */}
-        {camera.connection_method === 'ip' && (
+        {/* Backend Camera Debug Panel */}
+        {usesBackendCamera(camera) && (
           <div style={{ marginTop: 8, padding: '6px 12px', background: 'rgba(0, 0, 0, 0.45)', borderRadius: 6, border: '1px solid rgba(255, 255, 255, 0.08)', fontSize: 12 }}>
             <div
               style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', cursor: 'pointer', userSelect: 'none' }}
@@ -842,9 +859,9 @@ function CameraPanel({
             const isEditing = editingSlotId === slot.id;
             const hasAoi = aoi && aoi.points.length >= 3;
 
-            // For slots on an IP camera, overlay the live occupied state from Python /state (stableOccupied)
+            // For slots on a backend camera (IP or USB), overlay the live occupied state from Python /state (stableOccupied)
             let displayStatus = slot.status;
-            if (camera.connection_method === 'ip' && liveSlotStates && slot.status !== 'disabled' && slot.status !== 'reserved') {
+            if (usesBackendCamera(camera) && liveSlotStates && slot.status !== 'disabled' && slot.status !== 'reserved') {
               const live = liveSlotStates[slot.id] ||
                 liveSlotStates[slot.slot_id] ||
                 liveSlotStates[slot.slot_id.toLowerCase()] ||

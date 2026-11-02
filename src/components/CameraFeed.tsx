@@ -41,6 +41,45 @@ interface CameraFeedProps {
   deviceId?: string | null;
 }
 
+const AUTOSTART_STORAGE_KEY = 'plpark_camera_autostart';
+const LAST_CAMERA_STORAGE_KEY = (mode: 'entrance' | 'exit') => `plpark_last_camera_${mode}`;
+
+const isVirtualDevice = (label: string): boolean => {
+  return /obs|virtual/i.test(label || '');
+};
+
+const resolveSavedDevice = (
+  devList: CameraDevice[],
+  configuredDeviceId: string | null | undefined,
+  currentMode: 'entrance' | 'exit'
+): CameraDevice | null => {
+  if (!devList || devList.length === 0) return null;
+
+  // 1. Check configured camera deviceId prop
+  if (configuredDeviceId) {
+    const found = devList.find(d => d.deviceId === configuredDeviceId);
+    if (found && !isVirtualDevice(found.label)) {
+      return found;
+    }
+  }
+
+  // 2. Check localStorage for last manually chosen device for this mode
+  try {
+    const lastChosenId = localStorage.getItem(LAST_CAMERA_STORAGE_KEY(currentMode));
+    if (lastChosenId) {
+      const found = devList.find(d => d.deviceId === lastChosenId);
+      if (found && !isVirtualDevice(found.label)) {
+        return found;
+      }
+    }
+  } catch {
+    // Ignore localStorage errors
+  }
+
+  // 3. Do NOT fall back to first device in list
+  return null;
+};
+
 /**
  * CameraFeed — Renders live camera with YOLO overlay and detection controls.
  */
@@ -55,11 +94,31 @@ export function CameraFeed({ mode, onEntranceResult, onExitResult, deviceId }: C
   const captureUnsubRef = useRef<(() => void) | null>(null);
   const resumeUnsubRef = useRef<(() => void) | null>(null);
 
+  // Auto-start & lifecycle control refs
+  const hasAutoStartedRef = useRef<boolean>(false);
+  const userStoppedRef = useRef<boolean>(false);
+  const isStartingRef = useRef<boolean>(false);
+  const isDisposingRef = useRef<boolean>(false);
+  const prevModeRef = useRef<'entrance' | 'exit'>(mode);
+  const prevDeviceIdRef = useRef<string | null | undefined>(deviceId);
+
   // ============================================================
   // STATE
   // ============================================================
   const [devices, setDevices] = useState<CameraDevice[]>([]);
+  const [devicesLoaded, setDevicesLoaded] = useState<boolean>(false);
   const [selectedDevice, setSelectedDevice] = useState<string>('');
+  const [permissionDenied, setPermissionDenied] = useState<boolean>(false);
+  const [autoStartEnabled, setAutoStartEnabled] = useState<boolean>(() => {
+    try {
+      const saved = localStorage.getItem(AUTOSTART_STORAGE_KEY);
+      return saved !== null ? saved === 'true' : true; // ON by default
+    } catch {
+      return true;
+    }
+  });
+  const [autoStartedLabel, setAutoStartedLabel] = useState<string | null>(null);
+
   const [status, setStatus] = useState<PipelineStatus>('idle');
   const [isRunning, setIsRunning] = useState(false);
   const [isInitialized, setIsInitialized] = useState(false);
@@ -109,20 +168,47 @@ export function CameraFeed({ mode, onEntranceResult, onExitResult, deviceId }: C
     return unsub;
   }, []);
 
+  // Check camera permission on mount
+  useEffect(() => {
+    let active = true;
+    if (typeof navigator !== 'undefined' && navigator.permissions?.query) {
+      navigator.permissions.query({ name: 'camera' as PermissionName })
+        .then(perm => {
+          if (!active) return;
+          if (perm.state === 'denied') {
+            setPermissionDenied(true);
+          }
+          perm.onchange = () => {
+            if (!active) return;
+            setPermissionDenied(perm.state === 'denied');
+          };
+        })
+        .catch(() => {
+          // 'camera' query name unsupported on some browsers; ignore
+        });
+    }
+    return () => {
+      active = false;
+    };
+  }, []);
+
   // ============================================================
   // INITIALIZATION
   // ============================================================
 
   /** Enumerate available cameras on mount */
   useEffect(() => {
+    let isCurrent = true;
     const cam = new CameraManager();
     cam.enumerateDevices().then(devs => {
+      if (!isCurrent) return;
       setDevices(devs);
-      if (devs.length > 0) {
-        setSelectedDevice(deviceId && devs.some(device => device.deviceId === deviceId) ? deviceId : devs[0].deviceId);
-      }
+      setDevicesLoaded(true);
     });
-  }, [deviceId]);
+    return () => {
+      isCurrent = false;
+    };
+  }, []);
 
   /**
    * drawOverlay — Draws YOLO bounding boxes on the canvas overlay.
@@ -249,14 +335,99 @@ export function CameraFeed({ mode, onEntranceResult, onExitResult, deviceId }: C
   // PIPELINE CONTROLS
   // ============================================================
 
+  // ============================================================
+  // PIPELINE CONTROLS & LIFECYCLE
+  // ============================================================
+
+  /**
+   * Helper to stop and dispose all active processors and release camera.
+   */
+  const disposeActiveProcessors = useCallback(async () => {
+    isDisposingRef.current = true;
+    try {
+      if (snapshotTimerRef.current) {
+        clearTimeout(snapshotTimerRef.current);
+        snapshotTimerRef.current = null;
+      }
+      if (captureUnsubRef.current) {
+        captureUnsubRef.current();
+        captureUnsubRef.current = null;
+      }
+      if (resumeUnsubRef.current) {
+        resumeUnsubRef.current();
+        resumeUnsubRef.current = null;
+      }
+
+      setCapturedFrame(null);
+      setIsShutterFlashing(false);
+      setShowResumeToast(false);
+      setIsFadingOutFreeze(false);
+      setLastResultData(null);
+
+      const entranceProc = entranceProcessorRef.current;
+      entranceProcessorRef.current = null;
+      if (entranceProc) {
+        await entranceProc.stop();
+      }
+
+      const exitProc = exitProcessorRef.current;
+      exitProcessorRef.current = null;
+      if (exitProc) {
+        await exitProc.stop();
+      }
+
+      setIsRunning(false);
+      setIsInitialized(false);
+      setDetections([]);
+      setPlateDetections([]);
+      setStatus('idle');
+
+      const canvas = overlayRef.current;
+      if (canvas) {
+        const ctx = canvas.getContext('2d');
+        ctx?.clearRect(0, 0, canvas.width, canvas.height);
+      }
+    } finally {
+      isDisposingRef.current = false;
+    }
+  }, []);
+
   /**
    * handleStart — Initializes the vision pipeline and starts processing.
    */
-  const handleStart = async () => {
+  const handleStart = async (targetDeviceId?: string, autoStartedDeviceName?: string) => {
+    const devId = targetDeviceId || selectedDevice;
+    if (!devId) return;
     if (!videoRef.current) return;
+    if (isStartingRef.current || isDisposingRef.current) return;
+    isStartingRef.current = true;
+
+    // Manual start resets user-stopped flag and clears auto-started label
+    if (!autoStartedDeviceName) {
+      userStoppedRef.current = false;
+      setAutoStartedLabel(null);
+    } else {
+      setAutoStartedLabel(autoStartedDeviceName);
+    }
+
     setError('');
+    setPermissionDenied(false);
 
     try {
+      // Permission check if supported
+      if (typeof navigator !== 'undefined' && navigator.permissions?.query) {
+        try {
+          const perm = await navigator.permissions.query({ name: 'camera' as PermissionName });
+          if (perm.state === 'denied') {
+            setPermissionDenied(true);
+            isStartingRef.current = false;
+            return;
+          }
+        } catch {
+          // Ignore unsupported query
+        }
+      }
+
       if (mode === 'entrance') {
         setInitProgress('Loading models...');
         const processor = new EntranceProcessor();
@@ -314,7 +485,7 @@ export function CameraFeed({ mode, onEntranceResult, onExitResult, deviceId }: C
 
         await processor.initialize();
         setInitProgress('Starting camera...');
-        await processor.startCamera(selectedDevice, videoRef.current);
+        await processor.startCamera(devId, videoRef.current);
         processor.startProcessing();
 
         entranceProcessorRef.current = processor;
@@ -377,7 +548,7 @@ export function CameraFeed({ mode, onEntranceResult, onExitResult, deviceId }: C
 
         await processor.initialize();
         setInitProgress('Starting camera...');
-        await processor.startCamera(selectedDevice, videoRef.current);
+        await processor.startCamera(devId, videoRef.current);
         processor.startProcessing();
 
         exitProcessorRef.current = processor;
@@ -387,68 +558,141 @@ export function CameraFeed({ mode, onEntranceResult, onExitResult, deviceId }: C
       setIsRunning(true);
       setInitProgress('');
     } catch (err: any) {
+      console.error('[CameraFeed] Start error:', err);
+      if (
+        err.name === 'NotAllowedError' ||
+        err.name === 'PermissionDeniedError' ||
+        err.message?.toLowerCase().includes('permission denied')
+      ) {
+        setPermissionDenied(true);
+      }
       setError(err.message || 'Failed to start vision pipeline');
       setInitProgress('');
+      setAutoStartedLabel(null);
+    } finally {
+      isStartingRef.current = false;
     }
   };
 
   /**
    * handleStop — Stops processing and releases camera.
+   * Never auto-starts again after the user presses Stop until they press Start.
    */
   const handleStop = async () => {
-    if (snapshotTimerRef.current) {
-      clearTimeout(snapshotTimerRef.current);
-      snapshotTimerRef.current = null;
-    }
-    setCapturedSnapshot(null);
+    userStoppedRef.current = true;
+    setAutoStartedLabel(null);
+    await disposeActiveProcessors();
+  };
 
-    if (captureUnsubRef.current) {
-      captureUnsubRef.current();
-      captureUnsubRef.current = null;
-    }
-    if (resumeUnsubRef.current) {
-      resumeUnsubRef.current();
-      resumeUnsubRef.current = null;
-    }
-    setCapturedFrame(null);
-    setIsShutterFlashing(false);
-    setShowResumeToast(false);
-    setIsFadingOutFreeze(false);
-    setLastResultData(null);
-
-    if (entranceProcessorRef.current) {
-      await entranceProcessorRef.current.stop();
-      entranceProcessorRef.current = null;
-    }
-    if (exitProcessorRef.current) {
-      await exitProcessorRef.current.stop();
-      exitProcessorRef.current = null;
-    }
-
-    setIsRunning(false);
-    setIsInitialized(false);
-    setDetections([]);
-    setPlateDetections([]);
-    setStatus('idle');
-
-    // Clear canvas
-    const canvas = overlayRef.current;
-    if (canvas) {
-      const ctx = canvas.getContext('2d');
-      ctx?.clearRect(0, 0, canvas.width, canvas.height);
+  /** Handle manual camera device selection from dropdown */
+  const handleDeviceChange = (newDeviceId: string) => {
+    setSelectedDevice(newDeviceId);
+    setAutoStartedLabel(null);
+    if (newDeviceId) {
+      try {
+        localStorage.setItem(LAST_CAMERA_STORAGE_KEY(mode), newDeviceId);
+      } catch {
+        // ignore
+      }
     }
   };
+
+  /** Handle Auto-start checkbox toggle */
+  const handleToggleAutoStart = (enabled: boolean) => {
+    setAutoStartEnabled(enabled);
+    try {
+      localStorage.setItem(AUTOSTART_STORAGE_KEY, String(enabled));
+    } catch {
+      // ignore
+    }
+  };
+
+  // Switching Entrance/Exit disposes the previous processor first, then allows auto-start for the new mode
+  useEffect(() => {
+    let isCurrent = true;
+    if (prevModeRef.current !== mode) {
+      prevModeRef.current = mode;
+      hasAutoStartedRef.current = false;
+      userStoppedRef.current = false;
+      setAutoStartedLabel(null);
+
+      void (async () => {
+        await disposeActiveProcessors();
+        if (!isCurrent) return;
+        if (devicesLoaded && devices.length > 0) {
+          const saved = resolveSavedDevice(devices, deviceId, mode);
+          if (saved) {
+            setSelectedDevice(saved.deviceId);
+            if (autoStartEnabled && !permissionDenied) {
+              hasAutoStartedRef.current = true;
+              void handleStart(saved.deviceId, saved.label);
+            }
+          } else {
+            setSelectedDevice('');
+          }
+        }
+      })();
+    }
+    return () => {
+      isCurrent = false;
+    };
+  }, [mode, devicesLoaded, devices, deviceId, autoStartEnabled, permissionDenied, disposeActiveProcessors]);
+
+  // When deviceId prop changes: reset auto-start ref and start if configured
+  useEffect(() => {
+    if (prevDeviceIdRef.current !== deviceId) {
+      prevDeviceIdRef.current = deviceId;
+      hasAutoStartedRef.current = false;
+      userStoppedRef.current = false;
+      setAutoStartedLabel(null);
+
+      if (devicesLoaded && devices.length > 0) {
+        const saved = resolveSavedDevice(devices, deviceId, mode);
+        if (saved) {
+          setSelectedDevice(saved.deviceId);
+          if (autoStartEnabled && !permissionDenied && !isRunning && !userStoppedRef.current) {
+            if (!capturedFrame && status !== 'captured' && status !== 'reading' && status !== 'result') {
+              hasAutoStartedRef.current = true;
+              void handleStart(saved.deviceId, saved.label);
+            }
+          }
+        } else if (!selectedDevice) {
+          setSelectedDevice('');
+        }
+      }
+    }
+  }, [deviceId, devicesLoaded, devices, mode, autoStartEnabled, permissionDenied, isRunning, capturedFrame, status, selectedDevice]);
+
+  // Auto-start once devices list loads
+  useEffect(() => {
+    if (!devicesLoaded || devices.length === 0) return;
+    if (hasAutoStartedRef.current) return;
+    if (userStoppedRef.current) return;
+    if (!autoStartEnabled) return;
+    if (permissionDenied) return;
+    if (isRunning) return;
+    if (capturedFrame || status === 'captured' || status === 'reading' || status === 'result') return;
+
+    const saved = resolveSavedDevice(devices, deviceId, mode);
+    if (saved) {
+      setSelectedDevice(saved.deviceId);
+      hasAutoStartedRef.current = true;
+      void handleStart(saved.deviceId, saved.label);
+    } else {
+      // Do NOT fall back to first device in list
+      setSelectedDevice(prev => {
+        if (prev && devices.some(d => d.deviceId === prev)) return prev;
+        return '';
+      });
+    }
+  }, [devicesLoaded, devices, deviceId, mode, autoStartEnabled, permissionDenied, isRunning, capturedFrame, status]);
 
   /** Cleanup on unmount */
   useEffect(() => {
     return () => {
-      if (snapshotTimerRef.current) clearTimeout(snapshotTimerRef.current);
-      if (captureUnsubRef.current) captureUnsubRef.current();
-      if (resumeUnsubRef.current) resumeUnsubRef.current();
-      entranceProcessorRef.current?.stop();
-      exitProcessorRef.current?.stop();
+      void disposeActiveProcessors();
     };
-  }, []);
+  }, [disposeActiveProcessors]);
 
   // ============================================================
   // STATUS DISPLAY HELPERS
@@ -688,13 +932,43 @@ export function CameraFeed({ mode, onEntranceResult, onExitResult, deviceId }: C
           </div>
         )}
 
+        {/* Camera Permission Denied Instruction Banner */}
+        {permissionDenied && (
+          <div
+            className="camera-permission-banner animate-fade-in"
+            role="alert"
+            style={{
+              position: 'absolute',
+              top: '12px',
+              left: '12px',
+              right: '12px',
+              background: 'rgba(153, 27, 27, 0.95)',
+              border: '1px solid #ef4444',
+              color: '#ffffff',
+              padding: '10px 14px',
+              borderRadius: '6px',
+              fontSize: '13px',
+              display: 'flex',
+              alignItems: 'center',
+              gap: '10px',
+              zIndex: 30,
+              boxShadow: '0 4px 12px rgba(0,0,0,0.3)'
+            }}
+          >
+            <span style={{ fontSize: '18px' }}>🚫</span>
+            <div style={{ flex: 1, lineHeight: '1.4' }}>
+              <strong>Camera permission denied.</strong> Please allow camera permissions in your browser settings to use the live feed.
+            </div>
+          </div>
+        )}
+
         {/* Idle State (no camera started) */}
         {!isRunning && !initProgress && !error && (
           <div className="camera-idle-overlay">
             <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5">
               <path d="M15 10l4.553-2.276A1 1 0 0121 8.618v6.764a1 1 0 01-1.447.894L15 14M5 18h8a2 2 0 002-2V8a2 2 0 00-2-2H5a2 2 0 00-2 2v8a2 2 0 002 2z" />
             </svg>
-            <span>Select a camera and click Start</span>
+            <span>Select the {mode} camera and press Start</span>
           </div>
         )}
       </div>
@@ -705,10 +979,13 @@ export function CameraFeed({ mode, onEntranceResult, onExitResult, deviceId }: C
         <div className="camera-device-select">
           <select
             value={selectedDevice}
-            onChange={e => setSelectedDevice(e.target.value)}
+            onChange={e => handleDeviceChange(e.target.value)}
             disabled={isRunning}
           >
             {devices.length === 0 && <option value="">No cameras found</option>}
+            {!selectedDevice && devices.length > 0 && (
+              <option value="">Select the {mode} camera...</option>
+            )}
             {devices.map(d => (
               <option key={d.deviceId} value={d.deviceId}>
                 {d.label}
@@ -722,8 +999,8 @@ export function CameraFeed({ mode, onEntranceResult, onExitResult, deviceId }: C
           {!isRunning ? (
             <button
               className="camera-start-btn"
-              onClick={handleStart}
-              disabled={devices.length === 0 || !!initProgress}
+              onClick={() => handleStart()}
+              disabled={!selectedDevice || devices.length === 0 || !!initProgress}
             >
               <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor">
                 <polygon points="5,3 19,12 5,21" />
@@ -737,6 +1014,57 @@ export function CameraFeed({ mode, onEntranceResult, onExitResult, deviceId }: C
               </svg>
               Stop
             </button>
+          )}
+
+          {/* Auto-start checkbox */}
+          <label
+            className="camera-autostart-toggle"
+            style={{
+              display: 'inline-flex',
+              alignItems: 'center',
+              gap: '6px',
+              fontSize: '12px',
+              color: '#94a3b8',
+              cursor: 'pointer',
+              userSelect: 'none',
+              marginLeft: '6px'
+            }}
+            title="Automatically start camera when page opens"
+          >
+            <input
+              type="checkbox"
+              checked={autoStartEnabled}
+              onChange={e => handleToggleAutoStart(e.target.checked)}
+              style={{ cursor: 'pointer', accentColor: '#2563eb' }}
+            />
+            <span>Auto-start</span>
+          </label>
+
+          {/* Auto-started badge */}
+          {isRunning && autoStartedLabel && (
+            <span
+              className="camera-autostarted-tag"
+              style={{
+                display: 'inline-flex',
+                alignItems: 'center',
+                gap: '5px',
+                fontSize: '11px',
+                color: '#34d399',
+                background: 'rgba(16, 185, 129, 0.12)',
+                border: '1px solid rgba(16, 185, 129, 0.3)',
+                padding: '3px 8px',
+                borderRadius: '4px',
+                marginLeft: '6px',
+                maxWidth: '220px',
+                overflow: 'hidden',
+                textOverflow: 'ellipsis',
+                whiteSpace: 'nowrap'
+              }}
+              title={`Auto-started: ${autoStartedLabel}`}
+            >
+              <span style={{ fontSize: '8px' }}>●</span>
+              Auto-started: {autoStartedLabel}
+            </span>
           )}
         </div>
 
